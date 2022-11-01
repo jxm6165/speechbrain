@@ -242,7 +242,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
         ---------
         tgt : torch.Tensor
             The sequence to the decoder.
-       src : torch.Tensor
+        src : torch.Tensor
             Raw audio instead of encoded audio.
         enc_len : torch.LongTensor
             Not used. 
