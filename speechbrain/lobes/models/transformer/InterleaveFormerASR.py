@@ -166,7 +166,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             src_key_padding_mask,
             tgt_key_padding_mask,
             src_mask,
-            tgt_mask, # this one could be the hopping causal mask! Postponed right now.
+            tgt_mask, # this one is the hopping causal mask! 
         ) = self.make_masks(src, tgt, wave_len, seg_stats, pad_idx=pad_idx)
 
         src = self.custom_src_module(src)
