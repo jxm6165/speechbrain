@@ -1763,10 +1763,11 @@ class InterleaveFormerBeamSearch(CentralizedBeamSearcher):
         memory = torch.index_select(memory, dim=0, index=index)
         return memory
 
-    def forward_step(self, inp_tokens, memory, enc_states, wav_len):
+    def forward_step(self, inp_tokens, memory, src, wav_len):
         """Performs a step in the implemented beamsearcher."""
         memory = _update_mem(inp_tokens, memory)
-        pred, attn = self.model.decode(memory, enc_states, wave_len = wav_len)
+        # src is passed in, instead of a piece of encoded audio
+        pred, attn = self.model.decode(memory, src, wave_len = wav_len)
         prob_dist = self.softmax(self.fc(pred) / self.temperature)
         return prob_dist[:, -1, :], memory, attn
 
