@@ -1,7 +1,6 @@
 """InterleaveFormer implementaion in a SpeechBrain style.
 Authors
 * Yiqi Wang, 2022
-* Aditya Rathod, 2022
 """
 import math
 import torch
@@ -16,6 +15,14 @@ import numpy as np
 from .Conformer import ConformerEncoder
 from speechbrain.nnet.activations import Swish
 from speechbrain.nnet.attention import RelPosEncXL
+
+"""
+pad_index: 0
+bos_index: 1
+eos_index: 2
+"""
+BOS = torch.tensor([[1]])
+EOS = torch.tensor([[2]])
 
 class InterleaveFormerInterface(nn.Module):
     """This is an interface for Interleaveformer model.
@@ -611,6 +618,7 @@ def rebatch(src1, src2, src1_stats, src2_stats):
         assert len( set(a_stats) ) == len( set(b_stats) )
 
         final_sample = [] 
+        # EOS is attached to each tgt sequence
         modality = [] 
 
         # true number of segments
@@ -626,19 +634,23 @@ def rebatch(src1, src2, src1_stats, src2_stats):
             # index to the end of the segment
             end_idx_audio, end_idx_text = a_stats[seg_idx], b_stats[seg_idx]
 
-            # interleaving
+            # interleaving 
+            # audio
             audio_seg = a[start_idx_audio: end_idx_audio]
             final_sample.append( audio_seg)
             modality += ([1,] * len(audio_seg))
+            # text
             text_seg = b[start_idx_text: end_idx_text]
             final_sample.append( text_seg )
-            modality += ([2,] * len(text_seg))
-
+            # an extra 2 added,indicates BOS
+            modality += ([2,] * (len(text_seg)) )
+       
         modality = torch.tensor( np.array(modality) ).to(final_sample[0].device)
+
         return torch.cat(final_sample, dim = 0), modality 
 
     batch_size = len(src1)
-    raw_batch = [] # each item is a bi-modality interleaved sample
+    raw_batch = [] # each item is a bi-modality interleaved sample.
     modalities = []# each item is a array indicates modality of a sample
     for idx in range(batch_size):
         unpad_sample, unpad_modality = _interleave(src1[idx], src2[idx], src1_stats[idx], src2_stats[idx])
