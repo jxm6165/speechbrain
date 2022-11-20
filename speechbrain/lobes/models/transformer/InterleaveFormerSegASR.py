@@ -1,57 +1,50 @@
-"""InterleaveFormer implementaion in a SpeechBrain style.
+"""Transformer for ASR in the SpeechBrain sytle.
 Authors
 * Yiqi Wang, 2022
 """
-import math
-import torch
-import torch.nn as nn
-from torch.nn.utils.rnn import pad_sequence
 
-import speechbrain as sb
+import torch  # noqa 42
+from torch import nn
 from typing import Optional
-import numpy as np
-
-
-from .Conformer import ConformerEncoder
+from speechbrain.nnet.linear import Linear
+from speechbrain.nnet.containers import ModuleList
+from speechbrain.lobes.models.transformer.InterleaveFormerSeg import (
+    InterleaveFormerInterface,
+    rebatch,
+    mask,
+    unmask,
+    NormalizedEmbedding,
+)
 from speechbrain.nnet.activations import Swish
-from speechbrain.nnet.attention import RelPosEncXL
+# from speechbrain.dataio.dataio import length_to_mask
 
-"""
-pad_index: 0
-bos_index: 1
-eos_index: 2
-"""
-BOS = torch.tensor([[1]])
-EOS = torch.tensor([[2]])
 
-class InterleaveFormerInterface(nn.Module):
-    """This is an interface for Interleaveformer model.
-    The forward function is modifed such that there's only autoregressive prediction
-    rather than tranditional encoder-decoder workflow since InterleaveFormer is a big "decoder"
-    (i.e. causal transformer)
-    arxiv PLACE HOLDER
+class InterleaveFormerASR(InterleaveFormerInterface):
+    """This is an implementation of InterleaveFormer model for ASR.
+    The architecture is based on the paper "PLACE HODLER":
+    arxiv PLACE HODLER
     Arguments
     ----------
-    d_model: int
-        The number of expected features in the model inputs (default=512).
-    nhead: int
+    tgt_vocab: int
+        Size of vocabulary.
+    input_size: int
+        Input feature size.
+    d_model : int, optional
+        Embedding dimension size.
+        (default=512).
+    nhead : int, optional
         The number of heads in the multi-head attention models (default=8).
-    num_encoder_layers: int, optional
-        The number of layers in the causal encoder.
-    num_decoder_layers: int, optional
-        The number of decoder layers in the decoder.
-        This part is kept to follow the TransformerInterface but not used.
-    dim_ffn: int, optional
-        The dimension of the feedforward network model hidden layer.
-    dropout: int, optional
-        The dropout value.
-    activation: torch.nn.Module, optional
-        The activation function for Feed-Forward Netowrk layer,
-        e.g., relu or gelu or swish.
-    custom_src_module: torch.nn.Module, optional
-        Module that processes the src features to expected feature dim.
-    custom_tgt_module: torch.nn.Module, optional
-        Module that processes the tgt features to expected feature dim.
+    num_encoder_layers : int, optional
+        The number of causal-encoder-layers (i.e. decoder) in the InterleaveFormer (default=6).
+    num_decoder_layers : int, optional
+        No actual decoder is needed.
+    dim_ffn : int, optional
+        The dimension of the feedforward network model (default=2048).
+    dropout : int, optional
+        The dropout value (default=0.1).
+    activation : torch.nn.Module, optional
+        The activation function of FFN layers.
+        Recommended: relu or gelu (default=relu).
     positional_encoding: str, optional
         Type of positional encoding used. e.g. 'fixed_abs_sine' for fixed absolute positional encodings.
     normalize_before: bool, optional
@@ -59,13 +52,12 @@ class InterleaveFormerInterface(nn.Module):
         Defaults to True as this was shown to lead to better performance and training stability.
     kernel_size: int, optional
         Kernel size in convolutional layers when Conformer is used.
-        Not used in InterleaveFormer
     bias: bool, optional
         Whether to use bias in Conformer convolutional layers.
-        Not used in InterleaveFormer
     encoder_module: str, optional
-        Choose between Conformer and Transformer for the encoder. The decoder is fixed to be a Transformer.
+        InterleaveFormer as a causal encoder. No other option!
     conformer_activation: torch.nn.Module, optional
+        NOT USED
         Activation module used after Conformer convolutional layers. E.g. Swish, ReLU etc. it has to be a torch Module.
     attention_type: str, optional
         Type of attention layer used in all Transformer or Conformer layers.
@@ -74,19 +66,24 @@ class InterleaveFormerInterface(nn.Module):
         Max length for the target and source sequence in input.
         Used for positional encodings.
     causal: bool, optional
-        InterleaveFormer's encoder is always causal
-    encoder_kdim: int, optional
-        Dimension of the key for the encoder.
-    encoder_vdim: int, optional
-        Dimension of the value for the encoder.
-    decoder_kdim: int, optional
-        Dimension of the key for the decoder.
-    decoder_vdim: int, optional
-        Dimension of the value for the decoder.
+        Whether the encoder should be causal or not (InterleaveFormer is always causal).
+        If causal the Conformer convolutional layer is causal.
+    Example
+    -------
+    >>> src = torch.rand([8, 200, 512]) # 200 is the padded total length including many bi-modality segments
+    >>> tgt = torch.randint(0, 720, [8, 200])
+    >>> net = TransformerASR(
+    ...     720, 512, 512, 8, 1, 1, 1024, activation=torch.nn.GELU
+    ... )
+    >>> enc_out = net.forward(src, tgt) # not that enc_out actually contains both audio and text
+    >>> enc_out.shape
+    torch.Size([8, 200, 512])
     """
 
     def __init__(
         self,
+        tgt_vocab,
+        input_size,
         d_model=512,
         nhead=8,
         num_encoder_layers=6,
@@ -94,10 +91,8 @@ class InterleaveFormerInterface(nn.Module):
         d_ffn=2048,
         dropout=0.1,
         activation=nn.ReLU,
-        custom_src_module=None,
-        custom_tgt_module=None,
         positional_encoding="fixed_abs_sine",
-        normalize_before=True,
+        normalize_before=False,
         kernel_size: Optional[int] = 31,
         bias: Optional[bool] = True,
         encoder_module: Optional[str] = "InterleaveFormer",
@@ -105,578 +100,239 @@ class InterleaveFormerInterface(nn.Module):
         attention_type: Optional[str] = "regularMHA",
         max_length: Optional[int] = 2500,
         causal: Optional[bool] = True,
-        encoder_kdim: Optional[int] = None,
-        encoder_vdim: Optional[int] = None,
-        decoder_kdim: Optional[int] = None,
-        decoder_vdim: Optional[int] = None,
     ):
-        super().__init__()
-        self.causal = causal
-        self.attention_type = attention_type
-        self.positional_encoding_type = positional_encoding
-        self.encoder_kdim = encoder_kdim
-        self.encoder_vdim = encoder_vdim
-        self.decoder_kdim = decoder_kdim
-        self.decoder_vdim = decoder_vdim
-
-        assert attention_type in ["regularMHA", "RelPosMHAXL"]
-        assert positional_encoding in ["fixed_abs_sine", None]
-
-        assert (
-            num_encoder_layers + num_decoder_layers > 0
-        ), "number of encoder layers and number of decoder layers cannot both be 0!"
-
-        if positional_encoding == "fixed_abs_sine":
-            self.positional_encoding = PositionalEncoding(d_model, max_length)
-        elif positional_encoding is None:
-            pass
-            # no positional encodings
-
-        # overrides any other pos_embedding
-        if attention_type == "RelPosMHAXL":
-            self.positional_encoding = RelPosEncXL(d_model)
-            self.positional_encoding_decoder = PositionalEncoding(
-                d_model, max_length
-            )
-
-        # initialize the encoder
-        if num_encoder_layers > 0:
-            if custom_src_module is not None:
-                self.custom_src_module = custom_src_module(d_model)
-            if encoder_module == "InterleaveFormer":
-                self.encoder = InterleaveFormer(
-                    nhead=nhead,
-                    num_layers=num_encoder_layers,
-                    d_ffn=d_ffn,
-                    d_model=d_model,
-                    dropout=dropout,
-                    activation=activation,
-                    normalize_before=normalize_before,
-                    causal=self.causal,
-                    attention_type=self.attention_type,
-                    kdim=self.encoder_kdim,
-                    vdim=self.encoder_vdim,
-                )
-            else:
-                assert False,f"Unsupported model type. Needs a InterleaveFormer, but have {encoder_module}"
-
-    def forward(self, **kwags):
-        """Check InterleaveFormerASR.py InterleaveFormerASR's forward()"""
-        raise NotImplementedError
-
-
-class PositionalEncoding(nn.Module):
-    """This class implements the absolute sinusoidal positional encoding function.
-    PE(pos, 2i)   = sin(pos/(10000^(2i/dmodel)))
-    PE(pos, 2i+1) = cos(pos/(10000^(2i/dmodel)))
-    Arguments
-    ---------
-    input_size: int
-        Embedding dimension.
-    max_len : int, optional
-        Max length of the input sequences (default 2500).
-    Example
-    -------
-    >>> a = torch.rand((8, 120, 512))
-    >>> enc = PositionalEncoding(input_size=a.shape[-1])
-    >>> b = enc(a)
-    >>> b.shape
-    torch.Size([1, 120, 512])
-    """
-
-    def __init__(self, input_size, max_len=2500):
-        super().__init__()
-        self.max_len = max_len
-        pe = torch.zeros(self.max_len, input_size, requires_grad=False)
-        positions = torch.arange(0, self.max_len).unsqueeze(1).float()
-        denominator = torch.exp(
-            torch.arange(0, input_size, 2).float()
-            * -(math.log(10000.0) / input_size)
-        )
-
-        pe[:, 0::2] = torch.sin(positions * denominator)
-        pe[:, 1::2] = torch.cos(positions * denominator)
-        pe = pe.unsqueeze(0)
-        self.register_buffer("pe", pe)
-
-    def forward(self, x):
-        """
-        Arguments
-        ---------
-        x : tensor
-            Input feature shape (batch, time, fea)
-        """
-        return self.pe[:, : x.size(1)].clone().detach()
-
-
-class InterleaveFormerLayer(nn.Module):
-    """This is an implementation of causal self-attention multiway encoder layer
-    for the InterleaveFormer model. 2 modality expert FFN are added
-    Arguments
-    ----------
-    d_ffn: int, optional
-        The dimension of the feedforward network model hidden layer.
-    nhead: int
-        The number of heads in the multi-head attention models (default=8).
-    d_model: int
-        The number of expected features in the encoder/decoder inputs (default=512).
-    kdim: int, optional
-        Dimension of the key.
-    vdim: int, optional
-        Dimension of the value.
-    dropout: int, optional
-        The dropout value.
-    activation: torch.nn.Module, optional
-        The activation function for Feed-Forward Netowrk layer,
-        e.g., relu or gelu or swish.
-    normalize_before: bool, optional
-        Whether normalization should be applied before or after MHA or FFN in Transformer layers.
-        Defaults to True as this was shown to lead to better performance and training stability.
-    attention_type: str, optional
-        Type of attention layer used in all Transformer or Conformer layers.
-        e.g. regularMHA or RelPosMHA.
-    Example
-    -------
-    >>> import torch
-    >>> x = torch.rand((8, 60, 512))
-    >>> net = InterleaveFormerLayer(512, 8, d_model=512)
-    >>> output = net(x)
-    >>> output[0].shape
-    torch.Size([8, 60, 512])
-    """
-
-    def __init__(
-        self,
-        d_ffn,
-        nhead,
-        d_model,
-        kdim=None,
-        vdim=None,
-        dropout=0.0,
-        activation=nn.ReLU,
-        normalize_before=False,
-        attention_type="regularMHA",
-        causal=True,
-    ):
-        super().__init__()
-
-        if attention_type == "regularMHA":
-            self.self_att = sb.nnet.attention.MultiheadAttention(
-                nhead=nhead,
-                d_model=d_model,
-                dropout=dropout,
-                kdim=kdim,
-                vdim=vdim,
-            )
-
-        elif attention_type == "RelPosMHAXL":
-            self.self_att = sb.nnet.attention.RelPosMHAXL(
-                d_model, nhead, dropout, mask_pos_future=causal
-            )
-
-        # instantiated  2 modality experts here
-        self.audio_expert = sb.nnet.attention.PositionalwiseFeedForward(
+        super().__init__(
+            d_model=d_model,
+            nhead=nhead,
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers,
             d_ffn=d_ffn,
-            input_size=d_model,
             dropout=dropout,
             activation=activation,
+            positional_encoding=positional_encoding,
+            normalize_before=normalize_before,
+            kernel_size=kernel_size,
+            bias=bias,
+            encoder_module=encoder_module,
+            conformer_activation=conformer_activation,
+            attention_type=attention_type,
+            max_length=max_length,
+            causal=causal,
         )
 
-        self.text_expert = sb.nnet.attention.PositionalwiseFeedForward(
-            d_ffn=d_ffn,
-            input_size=d_model,
-            dropout=dropout,
-            activation=activation,
+        self.nhead = nhead # save it for causal mask broadcasting 
+
+        self.custom_src_module = ModuleList(
+            Linear(
+                input_size=input_size,
+                n_neurons=d_model,
+                bias=True,
+                combine_dims=False,
+            ),
+            torch.nn.Dropout(dropout),
+        )
+        self.custom_tgt_module = ModuleList(
+            NormalizedEmbedding(d_model, tgt_vocab)
         )
 
-        self.norm1 = sb.nnet.normalization.LayerNorm(d_model, eps=1e-6)
-        self.norm2 = sb.nnet.normalization.LayerNorm(d_model, eps=1e-6)
-        self.dropout1 = torch.nn.Dropout(dropout)
-        self.dropout2 = torch.nn.Dropout(dropout)
+        # reset parameters using xavier_normal_
+        self._init_params()
 
-        self.normalize_before = normalize_before
-
-    def forward(
-        self,
-        src,
-        modalities,
-        src_mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
-        pos_embs: Optional[torch.Tensor] = None,
-    ):
+    def forward(self, src, tgt, seg_stats, pad_idx=0):
         """
         Arguments
         ----------
         src : torch.Tensor
-            The sequence to the encoder layer.
-        modalities:
-            a np.array indicates modalities. batch_size x max_batch_len.
-        src_mask : torch.Tensor
-            The mask for the src query for each example in the batch.
-            now it actually a TGT_MASK that is passed in, which is a causal mask!
-        src_key_padding_mask : torch.Tensor, optional
-            The mask for the src keys for each example in the batch.
+            The sequence to the causal encoder.
+        tgt : torch.Tensor
+            The sequence to the causal encoder.
+        seg_stats:
+            a list of 2 np.array describe segment info.
+            audio_stats: numpy.array
+                array with size: batch x max_seg_num. Each element is the end idx of an aduio segment within a sequence
+            text_stats: numpy.array
+                array with size: batch x max_seg_num. Each element is the end idx of a text segment within a sequence
+        pad_idx : int, optional
+            The index for <pad> token (default=0).
         """
-
-        _, max_len, dim = src.shape
-        assert max_len == modalities.shape[1], f"modalities shape {modalities.shape} src shape{src.shape}"
+        audio_stats, text_stats = seg_stats
+        # reshpae the src vector to [Batch, Time, Fea] is a 4d vector is given
+        if src.ndim == 4:
+            bz, t, ch1, ch2 = src.shape
+            src = src.reshape(bz, t, ch1 * ch2)
         
-        if self.normalize_before:
-            src1 = self.norm1(src)
-        else:
-            src1 = src
+        # audio embedding
+        src = self.custom_src_module(src)
+        # add pos encoding to queries if are sinusoidal ones else
+        if self.attention_type == "RelPosMHAXL":
+            pos_embs_encoder = self.positional_encoding(src)
+        elif self.positional_encoding_type == "fixed_abs_sine":
+            src = src + self.positional_encoding(src)  # add the encodings here
+            pos_embs_encoder = None
 
-        output, self_attn = self.self_att(
-            src1,
-            src1,
-            src1,
-            attn_mask=src_mask, # remember it has to be a causal mask now!
-            key_padding_mask=src_key_padding_mask, # a key padding that deal with audio/text modality!
-            pos_embs=pos_embs,
+        # text embedding
+        tgt = self.custom_tgt_module(tgt)
+        if self.attention_type == "RelPosMHAXL":
+            assert False, f"Don't support RelPosMHAXL yet"
+        elif self.positional_encoding_type == "fixed_abs_sine":
+            tgt = tgt + self.positional_encoding(tgt)
+            pos_embs_target = None
+            pos_embs_encoder = None
+
+        # rebatching: interleaving and repadding
+        rebatch_sample, modalities = rebatch(src, tgt, audio_stats, text_stats)
+        print( f"{rebatch_sample.shape} {src.shape}" )
+        (
+            padding_mask,
+            causal_mask, # causal for text, non-causal for audio.
+        ) = self.make_masks(rebatch_sample, modalities, audio_stats, text_stats)
+        # repeat each sample's causal mask by num_heads # of times.
+        causal_mask = torch.cat( causal_mask ).repeat_interleave(repeats = self.nhead, dim = 0).to(rebatch_sample.device)
+        padding_mask = padding_mask.to(rebatch_sample.device)
+        
+        # encoded_output is bi-modality learned representation.
+        encoded_output, _ = self.encoder(
+            src= rebatch_sample,
+            modalities = modalities, # used by modality expert
+            src_mask= causal_mask, # this must be a causal mask, hopping style
+            src_key_padding_mask=padding_mask,
+            pos_embs=pos_embs_encoder,
         )
 
-        # add & norm
-        src = src + self.dropout1(output)
-        if not self.normalize_before:
-            src = self.norm1(src)
+        return encoded_output, modalities
 
-        if self.normalize_before:
-            src1 = self.norm2(src)
-        else:
-            src1 = src
-
-        # apply 2 modality experts on their own modality using modalities indicator array
-        audio_features = torch.unsqueeze( (modalities == 1), -1).float().repeat(1,1,dim) * src1
-        text_features = torch.unsqueeze( (modalities == 2), -1).float().repeat(1,1,dim) * src1
-        output = self.audio_expert(audio_features) + self.text_expert(text_features)
-        # add & norm
-        output = src + self.dropout2(output)
-        if not self.normalize_before:
-            output = self.norm2(output)
-        return output, self_attn
-
-
-class InterleaveFormer(nn.Module):
-    """This class implements the InterleaveFormer causal encoder.
-    Arguments
-    ---------
-    num_layers : int
-        Number of transformer layers to include.
-    nhead : int
-        Number of attention heads.
-    d_ffn : int
-        Hidden size of self-attention Feed Forward layer.
-    d_model : int
-        The dimension of the input embedding.
-    kdim : int
-        Dimension for key (Optional).
-    vdim : int
-        Dimension for value (Optional).
-    dropout : float
-        Dropout for the encoder (Optional).
-    input_module: torch class
-        The module to process the source input feature to expected
-        feature dimension (Optional).
-    Example
-    -------
-    >>> import torch
-    >>> x = torch.rand((8, 60, 512))
-    >>> net = InterleaveFormer(1, 8, 512, d_model=512)
-    >>> output, _ = net(x)
-    >>> output.shape
-    torch.Size([8, 60, 512])
-    """
-
-    def __init__(
-        self,
-        num_layers,
-        nhead,
-        d_ffn,
-        input_shape=None,
-        d_model=None,
-        kdim=None,
-        vdim=None,
-        dropout=0.0,
-        activation=nn.ReLU,
-        normalize_before=False,
-        causal=False,
-        layerdrop_prob=0.0,
-        attention_type="regularMHA",
-    ):
-        super().__init__()
-
-        self.layers = torch.nn.ModuleList(
-            [
-                InterleaveFormerLayer(
-                    d_ffn=d_ffn,
-                    nhead=nhead,
-                    d_model=d_model,
-                    kdim=kdim,
-                    vdim=vdim,
-                    dropout=dropout,
-                    activation=activation,
-                    normalize_before=normalize_before,
-                    causal=causal,
-                    attention_type=attention_type,
-                )
-                for i in range(num_layers)
-            ]
-        )
-        self.norm = sb.nnet.normalization.LayerNorm(d_model, eps=1e-6)
-        self.layerdrop_prob = layerdrop_prob
-        self.rng = np.random.default_rng()
-
-    def forward(
-        self,
-        src,
-        modalities,
-        src_mask: Optional[torch.Tensor] = None,
-        src_key_padding_mask: Optional[torch.Tensor] = None,
-        pos_embs: Optional[torch.Tensor] = None,
-    ):
+    def make_masks(self, rebatch_sample, modalities, audio_stats, text_stats):
         """
+        This method generates the masks for training the transformer model.
+        1. create a normal causal mask
+        2. for current segment j, unmask all audio frames belongs to j
+        3. if j > 0, then mask audio frames belongs to segment j for all future segment j' > j      
         Arguments
-        ----------
-        src : tensor
-            The sequence to the encoder layer (required).
-        modalities:
-            a np.array indicates modalities. batch_size x max_batch_len
-        src_mask : tensor
-            The mask for the src sequence (optional).
-            now it actually a TGT_MASK that is passed in, which is a causal mask!
-        src_key_padding_mask : tensor
-            The mask for the src keys per batch (optional).
+        ---------
+        rebatch_sample: tensor
+            bi-modality samples that are interleaved and repadded.
+        modalities : tensor
+            Each element indicates the modality. 1 for audio. 2 for text. 0 for padding.
+            size: batch x max_sample_len. 
+        audio_stats: numpy.array, optional
+            array with size: batch x max_seg_num. Each element is the end idx of an aduio segment within a sequence
+        text_stats:
+            array with size: batch x max_seg_num. Each element is the end idx of a text segment within a sequence
         """
-        output = src
-        if self.layerdrop_prob > 0.0:
-            keep_probs = self.rng.random(len(self.layers))
-        else:
-            keep_probs = None
-        attention_lst = []
-        for i, enc_layer in enumerate(self.layers):
-            if (
-                not self.training
-                or self.layerdrop_prob == 0.0
-                or keep_probs[i] > self.layerdrop_prob
-            ):
-                output, attention = enc_layer(
-                    output,
-                    modalities,
-                    src_mask=src_mask,
-                    src_key_padding_mask=src_key_padding_mask,
-                    pos_embs=pos_embs,
-                )
+        batch_size, max_len, dim = rebatch_sample.shape
+        
+        # make a normal causal mask first
+        inf = float( 'inf')
+        normal_causal_mask = torch.tensor( - inf).repeat(max_len, max_len)
+        normal_causal_mask = torch.triu(normal_causal_mask,1)
 
-                attention_lst.append(attention)
-        output = self.norm(output)
-        return output, attention_lst
+        # make causal mask for each sample 
+        final_mask = []
+        for _ in range(0, batch_size):
+            sample_idx = _
+            hopping_causal_mask = normal_causal_mask.clone()
+            # number segment == unique element in an array
+            num_seg = len( set( audio_stats[sample_idx] ) )
+            # print(f"sample {sample_idx} has {num_seg} # of segments")
+            # print("modality indicator:", modalities[sample_idx])
+            for idx in range(  num_seg ):
+                # do unmask operation
+                start_idx = 0
+                end_idx = audio_stats[sample_idx][idx]
+                if idx > 0:
+                    # consider all the past audio and text for start
+                    start_idx =  audio_stats[sample_idx][idx-1] + text_stats[sample_idx][idx-1]
+                    # consider all the past audio/text + current audio
+                    end_idx = audio_stats[sample_idx][idx] + text_stats[sample_idx][idx-1]
+                hopping_causal_mask = unmask( hopping_causal_mask, start_idx, end_idx) 
+                # print("Unmasking current audio\n", hopping_causal_mask, "\n")
+                if num_seg == 1:
+                    # if only 1 segment, no need to do mask operation for past audio (there's no past)
+                    # print("No need to mask past audio\n")
+                    final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
+                    break
+                else:
+                    # do mask operation
+                    delta = text_stats[sample_idx][idx]
+                    if idx > 0:
+                        delta -= text_stats[sample_idx][idx-1]
+                    start_row_idx = end_idx + (delta )
+                    if start_row_idx < len(modalities[sample_idx]):
+                        # make sure unnecessary masking is not done 
+                        hopping_causal_mask = mask( hopping_causal_mask, start_row_idx, start_idx, end_idx) 
+                        # print("Start masking audio from row idx:", start_row_idx)
+                        # print("Masking past audio\n", hopping_causal_mask, "\n")
+
+            final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
+        
+        padding_mask = modalities == 0
+        return padding_mask, final_mask
+
+    @torch.no_grad()
+    def decode(self, tgt, src, wave_len, enc_len=None):
+        """This method implements a decoding step for the InterleaveFormer model.
+        Arguments
+        ---------
+        tgt : torch.Tensor
+            The sequence to the decoder.
+        src : torch.Tensor
+            Raw audio instead of encoded audio.
+        enc_len : torch.LongTensor
+            Not used. 
+            The actual length of encoder states.
+        """
+        assert False, f"Need to rewrite this"
+        if src.ndim == 4:
+            bz, t, ch1, ch2 = src.shape
+            src = src.reshape(bz, t, ch1 * ch2)
+
+        _, max_audio, _ = src.shape
+        bin_width, max_text, = tgt.shape # bin_width x 1 becaues each time 1 token but consider bin_width # of possibility in beam search
+        seg_stats = [max_audio, max_text]
+
+        (
+            src_key_padding_mask,
+            tgt_key_padding_mask,
+            src_mask,
+            tgt_mask, # this one could be the hopping causal mask! Postponed right now.
+        ) = self.make_masks(src, tgt, wave_len, seg_stats)
+
+        src = self.custom_src_module(src)
+        # add pos encoding to queries if are sinusoidal ones else
+        if self.attention_type == "RelPosMHAXL":
+            pos_embs_encoder = self.positional_encoding(src)
+        elif self.positional_encoding_type == "fixed_abs_sine":
+            src = src + self.positional_encoding(src)  # add the encodings here
+            pos_embs_encoder = None
 
 
+        tgt = self.custom_tgt_module(tgt)
+        if self.attention_type == "RelPosMHAXL":
+            # we use fixed positional encodings in the decoder
+            assert False, f"Not supported yet"
+        elif self.positional_encoding_type == "fixed_abs_sine":
+            tgt = tgt + self.positional_encoding(tgt)  # add the encodings here
+            pos_embs_target = None
+            pos_embs_encoder = None
 
-class NormalizedEmbedding(nn.Module):
-    """This class implements the normalized embedding layer for the transformer.
-    Since the dot product of the self-attention is always normalized by sqrt(d_model)
-    and the final linear projection for prediction shares weight with the embedding layer,
-    we multiply the output of the embedding by sqrt(d_model).
-    Arguments
-    ---------
-    d_model: int
-        The number of expected features in the encoder/decoder inputs (default=512).
-    vocab: int
-        The vocab size.
-    Example
-    -------
-    >>> emb = NormalizedEmbedding(512, 1000)
-    >>> trg = torch.randint(0, 999, (8, 50))
-    >>> emb_fea = emb(trg)
-    """
+        # souce has batch_size (which is 1) x horizon x feature where tgt is bin_size x horizon
+        # Make them match in the first dimension! 
+        final_src = torch.cat([src.repeat(bin_width,1,1), tgt], dim = 1)
+        # assert False, f"wave: {wave_len} {src_key_padding_mask.shape} {tgt.shape} {tgt_key_padding_mask.shape} {tgt_mask.shape} "
+        final_padding_mask = torch.cat([src_key_padding_mask.repeat(bin_width,1), tgt_key_padding_mask], dim = 1)
 
-    def __init__(self, d_model, vocab):
-        super().__init__()
-        self.emb = sb.nnet.embedding.Embedding(
-            num_embeddings=vocab, embedding_dim=d_model, blank_id=0
+        # encoded_output is bi-modality learned representation.
+        encoded_output, attn = self.encoder(
+            src=final_src,
+            seg_stats = seg_stats, # used by modality expert
+            src_mask=tgt_mask, # this must be a causal mask, hopping style
+            src_key_padding_mask=final_padding_mask,
+            pos_embs=pos_embs_encoder,
         )
-        self.d_model = d_model
+        prediction = encoded_output[:, max_audio: ]
+        return prediction, attn[-1]
 
-    def forward(self, x):
-        """ Processes the input tensor x and returns an output tensor."""
-        return self.emb(x) * math.sqrt(self.d_model)
-
-
-def get_key_padding_mask(padded_input, pad_idx):
-    """Creates a binary mask to prevent attention to padded locations.
-    Arguments
-    ----------
-    padded_input: int
-        Padded input.
-    pad_idx:
-        idx for padding element.
-    Example
-    -------
-    >>> a = torch.LongTensor([[1,1,0], [2,3,0], [4,5,0]])
-    >>> get_key_padding_mask(a, pad_idx=0)
-    tensor([[False, False,  True],
-            [False, False,  True],
-            [False, False,  True]])
-    """
-    if len(padded_input.shape) == 4:
-        bz, time, ch1, ch2 = padded_input.shape
-        padded_input = padded_input.reshape(bz, time, ch1 * ch2)
-
-    key_padded_mask = padded_input.eq(pad_idx).to(padded_input.device)
-
-    # if the input is more than 2d, mask the locations where they are silence
-    # across all channels
-    if len(padded_input.shape) > 2:
-        key_padded_mask = key_padded_mask.float().prod(dim=-1).bool()
-        return key_padded_mask.detach()
-
-    return key_padded_mask.detach()
-
-
-def get_lookahead_mask(padded_input):
-    """Creates a binary mask for each sequence which maskes future frames.
-    Arguments
-    ---------
-    padded_input: torch.Tensor
-        Padded input tensor.
-    Example
-    -------
-    >>> a = torch.LongTensor([[1,1,0], [2,3,0], [4,5,0]])
-    >>> get_lookahead_mask(a)
-    tensor([[0., -inf, -inf],
-            [0., 0., -inf],
-            [0., 0., 0.]])
-    """
-    seq_len = padded_input.shape[1]
-    mask = (
-        torch.triu(torch.ones((seq_len, seq_len), device=padded_input.device))
-        == 1
-    ).transpose(0, 1)
-    mask = (
-        mask.float()
-        .masked_fill(mask == 0, float("-inf"))
-        .masked_fill(mask == 1, float(0.0))
-    )
-    return mask.detach().to(padded_input.device)
-
-def get_lookahead_hopping_mask(padded_input, seg_stats):
-    """Creates a binary mask for each sequence which maskes future frames in a hopping style
-    since audio segments are not predicted autoregressively but text does.
-    Arguments
-    ---------
-    padded_input: torch.Tensor
-        Padded input tensor.
-    seg_stats:
-        array of [max_audio_len, max_text_len]
-        # dictionary
-        # Bi-modality indicator { key_i: array for i in batch} used by modality expert.
-        # Key_i: key to index sample.
-        # Value_of_key_i: Even element is audio segment true length. Odd element is text tokens true length.
-    Example
-    -------
-    >>> a = torch.rand(1,10) # a random Tensor represent a sample
-    >>> seg_stats = [3,2] # first 3 features belongs to audio where next 2 features are text
-    >>> get_lookahead_mask(a) # notice that althought seq len is 10 but the shape of mask is 6x10 instead of 10x10
-    tensor([[0., 0., 0., -inf, -inf],
-            [0., 0., 0., -inf, -inf],
-            [0., 0., 0., -inf, -inf],
-            [0., 0., 0., 0.,   -inf],
-            [0., 0., 0., 0.,   0.  ],]
-            )
-    """
-    # NOT implemented YET!
-    # pleaes follow get_lookahead_mask(padded_input) style
-    assert padded_input.shape[1] == seg_stats[1]
-    max_audio, max_text = seg_stats
-    inf = float( 'inf')
-    total_len = sum(seg_stats)
-    tgt_mask = torch.tensor( - inf).repeat(total_len,total_len)
-    tgt_mask = torch.triu(tgt_mask,1)
-    tgt_mask[:max_audio,:max_audio] = 0
-
-    return tgt_mask.detach().to(padded_input.device)
-
-def rebatch(src1, src2, src1_stats, src2_stats):
-    """
-    src1 and src2 will be interleaved and repadded according to src1_stats and src2_stats
-    A modality mask will be returned 
-    Arguments
-    ---------
-    src1:       a tensor array
-    src2:       a tensor array
-    src1_stats: each row describe segmentation of a sample from src1
-    src2_stats: each row describe segmentation of a sample from src2
-
-    return: 
-                interleaved bi-modality sample from src1 and src2 based src stats
-                modality indicator (1 for audio, 2 for text, 0 for padding)
-    """
-    def _interleave(a, b, a_stats, b_stats):
-        """interleaving at sample level"""
-        # a sample's audio and text must have same # of segments
-        assert len( set(a_stats) ) == len( set(b_stats) )
-
-        final_sample = [] 
-        # EOS is attached to each tgt sequence
-        modality = [] 
-
-        # true number of segments
-        # if a seg_stat is padded, then the previous stats will be repeated
-        num_seg = len( set( a_stats  ) ) 
-
-        # clip each segment from the entire data
-        for seg_idx in range(0, num_seg ):
-            start_idx_audio, start_idx_text = 0, 0
-            if seg_idx > 0:
-                start_idx_audio = a_stats[seg_idx-1]
-                start_idx_text = b_stats[seg_idx-1]
-            # index to the end of the segment
-            end_idx_audio, end_idx_text = a_stats[seg_idx], b_stats[seg_idx]
-
-            # interleaving 
-            # audio
-            audio_seg = a[start_idx_audio: end_idx_audio]
-            final_sample.append( audio_seg)
-            modality += ([1,] * len(audio_seg))
-            # text
-            text_seg = b[start_idx_text: end_idx_text]
-            final_sample.append( text_seg )
-            # an extra 2 added,indicates BOS
-            modality += ([2,] * (len(text_seg)) )
-       
-        modality = torch.tensor( np.array(modality) ).to(final_sample[0].device)
-
-        return torch.cat(final_sample, dim = 0), modality 
-
-    batch_size = len(src1)
-    raw_batch = [] # each item is a bi-modality interleaved sample.
-    modalities = []# each item is a array indicates modality of a sample
-    for idx in range(batch_size):
-        unpad_sample, unpad_modality = _interleave(src1[idx], src2[idx], src1_stats[idx], src2_stats[idx])
-        raw_batch.append(unpad_sample)
-        modalities.append(unpad_modality)
-    return pad_sequence( raw_batch, batch_first=True ), pad_sequence( modalities, batch_first=True )
-
-def unmask(mask, start, end):
-    """
-    this function is used to unmask audio to make it non-causal locally within its current segment
-    mask: a causal mask that needs to be modified
-    start: the start (inclusive) of unmasking 
-    end: the end (exclusive) of unmasking
-    """
-    mask[start:, start:end] = 0
-    return mask
-
-def mask(_mask, start_row, start_col, end_col):
-    """
-    this function is used to mask past audio from segment 0 to j-1 to 
-    make it invisible for a current segment j.
-    _mask: a causal mask that needs to be modified
-    start_row, the start (inclusive) row index of masking
-    start_col: the start (inclusive) column of masking
-    end_col: the end (exclusive) column of masking
-    """
-    inf = float( 'inf')
-    _mask[start_row:, start_col:end_col] = -inf
-    return _mask
+    def _init_params(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                torch.nn.init.xavier_normal_(p)
