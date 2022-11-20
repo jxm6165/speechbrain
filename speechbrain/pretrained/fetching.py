@@ -87,8 +87,8 @@ def fetch(
     sourcefile = f"{source}/{filename}"
     destination = savedir / save_filename
     if destination.exists() and not overwrite:
-        MSG = f"Fetch {filename}: Using existing file/symlink in {str(destination)}."
-        logger.info(MSG)
+#         MSG = f"Fetch {filename}: Using existing file/symlink in {str(destination)}."
+#         logger.info(MSG)
         return destination
     if str(source).startswith("http:") or str(source).startswith("https:"):
         # Interpret source as web address.
