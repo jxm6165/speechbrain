@@ -23,6 +23,8 @@ import operator
 import os
 import sys
 import torch
+import torch.nn as nn
+from torch.nn.utils.rnn import pad_sequence
 import logging
 from pathlib import Path
 import speechbrain as sb
@@ -32,7 +34,6 @@ from speechbrain.pretrained import EncoderDecoderASR
 from speechbrain.alignment.ctc_segmentation import CTCSegmentation
 
 logger = logging.getLogger(__name__)
-
 
 # Define training procedure
 class ASR(sb.core.Brain):
@@ -62,26 +63,41 @@ class ASR(sb.core.Brain):
                 feats = self.hparams.augmentation(feats)
 
         # forward modules
-        # feat is downsampled
-
         audio_stats, token_stats = self.get_batch_stats(batch)
+        # token_stats don't have bos at front.
 
-        src = self.modules.CNN(feats)
-
-        _, audio_max_len, _, _ = src.shape
-        _, text_max_len = tokens_bos.shape
-        assert False, f"remember to recalculate audio stats after downsampling"
-        assert False, f"remember to recalculate seg_stats after mannually adding beggin of sentence to each seg"
-        assert False, f"where shoulud I add that BOS? inside the model, or outside here?"
-        seg_stats = np.array([audio_max_len, text_max_len ])
+        src = self.modules.CNN(feats) 
+        
+        # get relative len
+        max_abs_len = np.max(audio_stats, axis = 1).astype("float64")
+        audio_stats = audio_stats.astype("float64") / max_abs_len.reshape(-1,1)
+        # true_len = src.shape[1] * wav_lens.detach().cpu().numpy().reshape(-1, 1)
+        true_len = np.ceil( src.shape[1] * wav_lens.detach().cpu().numpy() ).reshape(-1, 1)
+        audio_stats = (audio_stats * true_len).astype(int)
+ 
+        # update each segment with extra bos
+        batch_token_seg_bos, batch_token_seg_eos, batch_tokens_eos_len, batch_tokens_len, text_stats = self.segment_eos_bos(tokens_bos, token_stats.copy())
+        # batch_tokens_len is  batch.tokens_len
+        seg_stats = [audio_stats, text_stats]
 
         # enc_out is the audio representation + text representation
         encoded_output, modalities = self.modules.Transformer(
-            src, tokens_bos, wav_lens, seg_stats = seg_stats, pad_idx=self.hparams.pad_index,
+            src, batch_token_seg_bos, seg_stats = seg_stats, pad_idx=self.hparams.pad_index,
         )
-        assert False
-        audio_representation = encoded_output[:,:seg_stats[0]]
-        text_representation = encoded_output[:,seg_stats[0]:]
+
+        dim = encoded_output.shape[2]
+        audio_representation = []
+        text_representation = []
+
+ 
+        for i, encoded in enumerate(encoded_output):
+          a = encoded[modalities[i]==1]
+          t = encoded[modalities[i]==2]
+          audio_representation.append(a)
+          text_representation.append(t)
+
+        audio_representation = pad_sequence( audio_representation, batch_first=True )
+        text_representation = pad_sequence( text_representation, batch_first=True )
 
         # output layer for ctc log-probabilities
         logits = self.modules.ctc_lin(audio_representation)
@@ -108,16 +124,72 @@ class ASR(sb.core.Brain):
         elif stage == sb.Stage.TEST:
             hyps, _ = self.hparams.test_search( audio_representation.detach(), src.detach(), wav_lens)
 
-        return p_ctc, p_seq, wav_lens, hyps
+        return p_ctc, p_seq, wav_lens, hyps, batch_token_seg_eos, torch.tensor( batch_tokens_eos_len).to(encoded_output.device)
+    
+    def segment_eos_bos(self, token_bos, text_stats):
+        """input token_bos as example. Reformulate token_bos, token_eos, text_stats"""
+        batch_size, _ = text_stats.shape
+        BOS = torch.tensor([1]).to(token_bos.device)
+        EOS = torch.tensor([2]).to(token_bos.device)
+        token_bos = token_bos[:,1:] # we remove bos from token_bos
+        batch_token_seg_bos = []
+        batch_token_seg_eos = []
+
+        batch_tokens_eos_len = []
+        batch_tokens_len = []
+        for sample_idx in range(batch_size):
+            seg_len = len( set(text_stats[sample_idx]) )
+            token_seg_bos = []
+            token_seg_eos = []
+
+            tokens_eos_len = 0
+            tokens_len = 0
+            for s in range(seg_len):
+                start_idx = 0 # to skip the bos
+                if s > 0:
+                    start_idx = text_stats[sample_idx][s-1]
+                    # since BOS of previous segs has been added, increase by s
+                    # i.e. for segment index 2, it has 2 seg before it. Add 2
+                    text_stats[sample_idx][s-1] += s
+                end_idx =  text_stats[sample_idx][s]
+                text_seg = token_bos[sample_idx][start_idx:end_idx]
+                # for token_bos
+                token_seg_bos.append(BOS)
+                token_seg_bos.append(text_seg)
+                # for token_eos
+                token_seg_eos.append(EOS)
+                token_seg_eos.append(text_seg)
+                # len calculation for compute objective
+                text_len = len(text_seg)
+                tokens_eos_len += (text_len + 1)
+                tokens_len += text_len
+                # if last segment, update all future segment
+                # i.e. if seg index 3 is the last one. Then it has to add 4 instead of 3
+                # since all previouus 3 segment include itself BOS has been added.
+                if s == (seg_len - 1):
+                    text_stats[sample_idx][s] += (s+1)
+                    text_stats[sample_idx][s:] = text_stats[sample_idx][s]
+            # assert False, f"{token_seg_bos[0].shape} {token_seg_bos[1].shape} {token_seg_bos[2].shape}"
+            batch_token_seg_bos.append( torch.cat(token_seg_bos, dim = 0))
+            batch_token_seg_eos.append( torch.cat(token_seg_eos, dim = 0))
+            batch_tokens_eos_len.append(tokens_eos_len)
+            batch_tokens_len.append(tokens_len)
+
+        batch_tokens_eos_len = np.array(batch_tokens_eos_len)
+        batch_tokens_len = np.array(batch_tokens_len)
+
+        batch_token_seg_bos = pad_sequence( batch_token_seg_bos, batch_first=True )
+        batch_token_seg_eos = pad_sequence( batch_token_seg_eos, batch_first=True )
+        return batch_token_seg_bos, batch_token_seg_eos, batch_tokens_eos_len, batch_tokens_len, text_stats
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        (p_ctc, p_seq, wav_lens, hyps,) = predictions
+        (p_ctc, p_seq, wav_lens, hyps, tokens_eos, tokens_eos_lens) = predictions
 
         ids = batch.id
-        tokens_eos, tokens_eos_lens = batch.tokens_eos
-        tokens, tokens_lens = batch.tokens
+        # tokens_eos, tokens_eos_lens = batch.tokens_eos
+        tokens, tokens_lens = batch.tokens 
 
         if hasattr(self.modules, "env_corrupt") and stage == sb.Stage.TRAIN:
             tokens_eos = torch.cat([tokens_eos, tokens_eos], dim=0)
@@ -395,13 +467,17 @@ def dataio_prepare(hparams):
 
     # Generate segments (Ours)
     # load an ASR model and CTC aligner
+  
     pre_trained = "speechbrain/asr-transformer-transformerlm-librispeech"
     asr_model = EncoderDecoderASR.from_hparams(source=pre_trained)
     aligner = CTCSegmentation(asr_model, kaldi_style_text=False)
 
+
     def get_audio_seg(wav, wrd):
         text = [" "+ sing_wrd + " " for sing_wrd in wrd.split(" ")]
+
         segs = aligner(wav, text)
+
         intervals = segs.segments
         seg_points_in_time = list(list(zip(*intervals))[1])
         audio_seg_points = [round(seg_point*16000)+1 for seg_point in seg_points_in_time]
@@ -425,7 +501,8 @@ def dataio_prepare(hparams):
 
     # 4. Set output:
     sb.dataio.dataset.set_output_keys(
-        datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"],
+        datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens", 
+        "audio_seg_points", "token_seg_points"],
     )
 
     # 5. If Dynamic Batching is used, we instantiate the needed samplers.
