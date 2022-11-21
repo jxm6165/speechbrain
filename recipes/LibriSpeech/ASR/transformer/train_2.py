@@ -61,39 +61,56 @@ class ASR(sb.core.Brain):
         if stage == sb.Stage.TRAIN:
             if hasattr(self.hparams, "augmentation"):
                 feats = self.hparams.augmentation(feats)
-
-        # forward modules
-        audio_stats, token_stats = self.get_batch_stats(batch)
-        # token_stats don't have bos at front.
-
+        
         src = self.modules.CNN(feats) 
         
-        # get relative len
-        max_abs_len = np.max(audio_stats, axis = 1).astype("float64")
-        audio_stats = audio_stats.astype("float64") / max_abs_len.reshape(-1,1)
-        # true_len = src.shape[1] * wav_lens.detach().cpu().numpy().reshape(-1, 1)
-        true_len = np.ceil( src.shape[1] * wav_lens.detach().cpu().numpy() ).reshape(-1, 1)
-        audio_stats = (audio_stats * true_len).astype(int)
- 
-        # update each segment with extra bos
-        batch_token_seg_bos, batch_token_seg_eos, batch_tokens_eos_len, batch_tokens_len, text_stats = self.segment_eos_bos(tokens_bos, token_stats.copy())
+        if self.gen_pkl:
+            # forward modules
+            audio_stats, token_stats = self.get_batch_stats(batch)
+            # token_stats don't have bos at front
+
+            # get relative len
+            max_abs_len = np.max(audio_stats, axis = 1).astype("float64")
+            audio_stats = audio_stats.astype("float64") / max_abs_len.reshape(-1,1)
+            # true_len = src.shape[1] * wav_lens.detach().cpu().numpy().reshape(-1, 1)
+            true_len = np.ceil( src.shape[1] * wav_lens.detach().cpu().numpy() ).reshape(-1, 1)
+            audio_stats = (audio_stats * true_len).astype(int)
+
+            # update each segment with extra bos
+            batch_token_seg_bos, batch_token_seg_eos, batch_tokens_eos_len, batch_tokens_len, text_stats = self.segment_eos_bos(tokens_bos, token_stats.copy())
+
+            # create dict to contain all stats
+            stats_dict = {}
+            stats_dict["audio_stats"] = audio_stats
+            stats_dict["batch_token_seg_bos"] = batch_token_seg_bos
+            stats_dict["batch_token_seg_eos"] = batch_token_seg_eos
+            stats_dict["batch_tokens_eos_len"] = batch_tokens_eos_len
+            stats_dict["batch_tokens_len"] = batch_tokens_len
+            stats_dict["text_stats"] = text_stats
+
+            # save to batch_stats, which is a list of dicts. This will be used to store stats and read from pkl
+            if stage == sb.Stage.TRAIN:
+                self.train_batch_stats[batch_idx] = stats_dict
+            elif stage == sb.Stage.VALID:
+                self.valid_batch_stats[batch_idx] = stats_dict
+            elif stage == sb.Stage.TEST:
+                self.test_batch_stats[batch_idx] = stats_dict
         
-        # create dict to contain all stats
-        dict = {}
-        dict["audio_stats"] = audio_stats
-        dict["batch_token_seg_bos"] = batch_token_seg_bos
-        dict["batch_token_seg_eos"] = batch_token_seg_eos
-        dict["batch_tokens_eos_len"] = batch_tokens_eos_len
-        dict["batch_tokens_len"] = batch_tokens_len
-        dict["text_stats"] = text_stats
-        
-        # save to batch_stats, which is a list of dicts. This will be used to store stats and read from pkl
-        if stage == sb.Stage.TRAIN:
-            self.train_batch_stats[batch_idx] = dict
-        elif stage == sb.Stage.VALID:
-            self.valid_batch_stats[batch_idx] = dict
-        elif stage == sb.Stage.TEST:
-            self.test_batch_stats[batch_idx] = dict
+        else:
+            # read batch stats from pkl
+            if stage == sb.Stage.TRAIN:
+                stats_dict = self.train_batch_stats[batch_idx]
+            elif stage == sb.Stage.VALID:
+                stats_dict = self.valid_batch_stats[batch_idx]
+            elif stage == sb.Stage.TEST:
+                stats_dict = self.test_batch_stats[batch_idx]
+            
+            audio_stats = stats_dict["audio_stats"]
+            batch_token_seg_bos = stats_dict["batch_token_seg_bos"]
+            batch_token_seg_eos = stats_dict["batch_token_seg_eos"]
+            batch_tokens_eos_len = stats_dict["batch_tokens_eos_len"]
+            batch_tokens_len = stats_dict["batch_tokens_len"]
+            text_stats = stats_dict["text_stats"]
         
         # batch_tokens_len is  batch.tokens_len
         seg_stats = [audio_stats, text_stats]
@@ -385,7 +402,7 @@ class ASR(sb.core.Brain):
         self.hparams.model.eval()
 
 
-def dataio_prepare(hparams):
+def dataio_prepare(hparams, have_pkl=True):
     """This function prepares the datasets to be used in the brain class.
     It also defines the data processing pipeline through user-defined functions."""
     data_folder = hparams["data_folder"]
@@ -482,46 +499,51 @@ def dataio_prepare(hparams):
         yield tokens
 
     sb.dataio.dataset.add_dynamic_item(datasets, text_pipeline)
-
-    # Generate segments (Ours)
-    # load an ASR model and CTC aligner
-  
-    pre_trained = "speechbrain/asr-transformer-transformerlm-librispeech"
-    asr_model = EncoderDecoderASR.from_hparams(source=pre_trained)
-    aligner = CTCSegmentation(asr_model, kaldi_style_text=False)
-
-
-    def get_audio_seg(wav, wrd):
-        text = [" "+ sing_wrd + " " for sing_wrd in wrd.split(" ")]
-
-        segs = aligner(wav, text)
-
-        intervals = segs.segments
-        seg_points_in_time = list(list(zip(*intervals))[1])
-        audio_seg_points = [round(seg_point*16000)+1 for seg_point in seg_points_in_time]
-        return audio_seg_points
-
-    def get_token_seg(wrds):
-        token_seg = [tokenizer.encode_as_ids(wrd) for wrd in wrds]
-        return [len(functools.reduce(operator.iconcat, token_seg[:i+1], [])) for i in range(len(token_seg))]
-
     
-    @sb.utils.data_pipeline.takes("wav", "wrd")
-    @sb.utils.data_pipeline.provides("audio_seg_points", "token_seg_points")
+    
+    # Generate segments if no stats pkl saved(Ours)
+    # load an ASR model and CTC aligner
+    if not have_pkl:
+        pre_trained = "speechbrain/asr-transformer-transformerlm-librispeech"
+        asr_model = EncoderDecoderASR.from_hparams(source=pre_trained)
+        aligner = CTCSegmentation(asr_model, kaldi_style_text=False)
 
-    def generate_segments(wav, wrd):
-        audio_seg_points = get_audio_seg(wav, wrd)
-        yield audio_seg_points
-        token_seg_points = get_token_seg(wrd.split(' '))
-        yield token_seg_points
-        
-    sb.dataio.dataset.add_dynamic_item(datasets, generate_segments)
+        def get_audio_seg(wav, wrd):
+            text = [" "+ sing_wrd + " " for sing_wrd in wrd.split(" ")]
+
+            segs = aligner(wav, text)
+
+            intervals = segs.segments
+            seg_points_in_time = list(list(zip(*intervals))[1])
+            audio_seg_points = [round(seg_point*16000)+1 for seg_point in seg_points_in_time]
+            return audio_seg_points
+
+        def get_token_seg(wrds):
+            token_seg = [tokenizer.encode_as_ids(wrd) for wrd in wrds]
+            return [len(functools.reduce(operator.iconcat, token_seg[:i+1], [])) for i in range(len(token_seg))]
+
+
+        @sb.utils.data_pipeline.takes("wav", "wrd")
+        @sb.utils.data_pipeline.provides("audio_seg_points", "token_seg_points")
+
+        def generate_segments(wav, wrd):
+            audio_seg_points = get_audio_seg(wav, wrd)
+            yield audio_seg_points
+            token_seg_points = get_token_seg(wrd.split(' '))
+            yield token_seg_points
+
+        sb.dataio.dataset.add_dynamic_item(datasets, generate_segments)
 
     # 4. Set output:
-    sb.dataio.dataset.set_output_keys(
-        datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens", 
-        "audio_seg_points", "token_seg_points"],
-    )
+    if not have_pkl:
+        sb.dataio.dataset.set_output_keys(
+            datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens", 
+            "audio_seg_points", "token_seg_points"],
+        )
+    else:
+        sb.dataio.dataset.set_output_keys(
+            datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"]
+        )
 
     # 5. If Dynamic Batching is used, we instantiate the needed samplers.
     train_batch_sampler = None
@@ -594,7 +616,14 @@ if __name__ == "__main__":
             "skip_prep": hparams["skip_prep"],
         },
     )
-
+    
+    # Check if stats pkl's are in data folder
+    have_pkl = False
+    if Path(os.path.join(data_folder, 'train_batch_stats.pkl')).is_file() and \
+       Path(os.path.join(data_folder, 'valid_batch_stats.pkl')).is_file() and \
+       Path(os.path.join(data_folder, 'test_batch_stats.pkl')).is_file():
+        have_pkl = True
+        
     # here we create the datasets objects as well as tokenization and encoding
     (
         train_data,
@@ -603,7 +632,7 @@ if __name__ == "__main__":
         tokenizer,
         train_bsampler,
         valid_bsampler,
-    ) = dataio_prepare(hparams)
+    ) = dataio_prepare(hparams, have_pkl=have_pkl)
 
     # We download the pretrained LM from HuggingFace (or elsewhere depending on
     # the path given in the YAML file). The tokenizer is loaded at the same time.
@@ -617,6 +646,7 @@ if __name__ == "__main__":
         hparams=hparams,
         run_opts=run_opts,
         checkpointer=hparams["checkpointer"],
+        data_folder=hparams["data_folder"],
     )
 
     # adding objects to trainer:
