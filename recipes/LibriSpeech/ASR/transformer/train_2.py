@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 # Define training procedure
 class ASR(sb.core.Brain):
-    def compute_forward(self, batch, stage):
+    def compute_forward(self, batch, batch_idx, stage):
         """Forward computations from the waveform batches to the output probabilities."""
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
@@ -77,6 +77,24 @@ class ASR(sb.core.Brain):
  
         # update each segment with extra bos
         batch_token_seg_bos, batch_token_seg_eos, batch_tokens_eos_len, batch_tokens_len, text_stats = self.segment_eos_bos(tokens_bos, token_stats.copy())
+        
+        # create dict to contain all stats
+        dict = {}
+        dict["audio_stats"] = audio_stats
+        dict["batch_token_seg_bos"] = batch_token_seg_bos
+        dict["batch_token_seg_eos"] = batch_token_seg_eos
+        dict["batch_tokens_eos_len"] = batch_tokens_eos_len
+        dict["batch_tokens_len"] = batch_tokens_len
+        dict["text_stats"] = text_stats
+        
+        # save to batch_stats, which is a list of dicts. This will be used to store stats and read from pkl
+        if stage == sb.Stage.TRAIN:
+            self.train_batch_stats[batch_idx] = dict
+        elif stage == sb.Stage.VALID:
+            self.valid_batch_stats[batch_idx] = dict
+        else:
+            self.test_batch_stats[batch_idx] = dict
+        
         # batch_tokens_len is  batch.tokens_len
         seg_stats = [audio_stats, text_stats]
 
@@ -248,14 +266,14 @@ class ASR(sb.core.Brain):
         
         return audio_stats, token_stats
 
-    def fit_batch(self, batch):
+    def fit_batch(self, batch, batch_idx):
 
         should_step = self.step % self.grad_accumulation_factor == 0
         # Managing automatic mixed precision
         if self.auto_mix_prec:
             self.optimizer.zero_grad()
             with torch.cuda.amp.autocast():
-                outputs = self.compute_forward(batch, sb.Stage.TRAIN)
+                outputs = self.compute_forward(batch, batch_idx, sb.Stage.TRAIN)
                 loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
             self.scaler.scale(loss / self.grad_accumulation_factor).backward()
             if should_step:
@@ -282,10 +300,10 @@ class ASR(sb.core.Brain):
 
         return loss.detach().cpu()
 
-    def evaluate_batch(self, batch, stage):
+    def evaluate_batch(self, batch, batch_idx, stage):
         """Computations needed for validation/test batches"""
         with torch.no_grad():
-            predictions = self.compute_forward(batch, stage=stage)
+            predictions = self.compute_forward(batch, batch_idx, stage=stage)
             loss = self.compute_objectives(predictions, batch, stage=stage)
         return loss.detach()
 
