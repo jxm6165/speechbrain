@@ -92,7 +92,7 @@ class ASR(sb.core.Brain):
             self.train_batch_stats[batch_idx] = dict
         elif stage == sb.Stage.VALID:
             self.valid_batch_stats[batch_idx] = dict
-        else:
+        elif stage == sb.Stage.TEST:
             self.test_batch_stats[batch_idx] = dict
         
         # batch_tokens_len is  batch.tokens_len
