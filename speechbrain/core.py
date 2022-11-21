@@ -992,9 +992,11 @@ class Brain:
         if stats_file.is_file():
             logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
             self.train_batch_stats = load_pkl(save_opt)
+            self.gen_pkl = False
         else:
             logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
             self.train_batch_stats = [{} for _ in range(len(train_set))] 
+            self.gen_pkl = True
         
         # Training stage
         self.on_stage_start(Stage.TRAIN, epoch)
@@ -1060,6 +1062,7 @@ class Brain:
         if not stats_file.is_file():
             logger.info("%s saved in %s." % (OPT_FILE, save_opt))
             save_pkl(self.train_batch_stats, save_opt)
+            self.gen_pkl = False
         
         self.avg_train_loss = 0.0
         self.step = 0
@@ -1074,9 +1077,11 @@ class Brain:
             if stats_file.is_file():
                 logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
                 self.valid_batch_stats = load_pkl(save_opt)
+                self.gen_pkl = False
             else:
                 logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
-                self.valid_batch_stats = [{} for _ in range(len(valid_set))]  
+                self.valid_batch_stats = [{} for _ in range(len(valid_set))]
+                self.gen_pkl = True
             
             self.on_stage_start(Stage.VALID, epoch)
             self.modules.eval()
@@ -1103,7 +1108,7 @@ class Brain:
                 if not stats_file.is_file():
                     logger.info("%s saved in %s." % (OPT_FILE, save_opt))
                     save_pkl(self.valid_batch_stats, save_opt)
-                
+                    self.gen_pkl = False
                 self.step = 0
                 run_on_main(
                     self.on_stage_end,
@@ -1290,10 +1295,11 @@ class Brain:
         if stats_file.is_file():
             logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
             self.test_batch_stats = load_pkl(save_opt)
+            self.gen_pkl = False
         else:
             logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
             self.test_batch_stats = [{} for _ in range(len(test_set))] 
-        
+            self.gen_pkl = True
         
         if progressbar is None:
             progressbar = not self.noprogressbar
@@ -1336,6 +1342,8 @@ class Brain:
         if not stats_file.is_file():
             logger.info("%s saved in %s." % (OPT_FILE, save_opt))
             save_pkl(self.test_batch_stats, save_opt)
+            self.gen_pkl = False
+            
         return avg_test_loss
 
     def update_average(self, loss, avg_loss):
