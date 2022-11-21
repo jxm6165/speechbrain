@@ -987,7 +987,7 @@ class Brain:
     def _fit_train(self, train_set, epoch, enable):
         # Create a list of dict to store or read train batch stats from pickle
         OPT_FILE = 'train_batch_stats.pkl'
-        save_opt = os.path.join(data_folder, OPT_FILE)
+        save_opt = os.path.join(self.data_folder, OPT_FILE)
         stats_file = pathlib.Path(save_opt)
         if stats_file.is_file():
             logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
@@ -1072,7 +1072,7 @@ class Brain:
         if valid_set is not None:
             # Create a list of dict to store and read valid batch stats from pickle
             OPT_FILE = 'valid_batch_stats.pkl'
-            save_opt = os.path.join(data_folder, OPT_FILE)
+            save_opt = os.path.join(self.data_folder, OPT_FILE)
             stats_file = pathlib.Path(save_opt)
             if stats_file.is_file():
                 logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
@@ -1290,7 +1290,7 @@ class Brain:
         """
         # Create a list of dict to store or read train batch stats from pickle
         OPT_FILE = 'test_batch_stats.pkl'
-        save_opt = os.path.join(data_folder, OPT_FILE)
+        save_opt = os.path.join(self.data_folder, OPT_FILE)
         stats_file = pathlib.Path(save_opt)
         if stats_file.is_file():
             logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
