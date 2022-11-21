@@ -619,6 +619,7 @@ if __name__ == "__main__":
     
     # Check if stats pkl's are in data folder
     have_pkl = False
+    data_folder = hparams["data_folder"]
     if Path(os.path.join(data_folder, 'train_batch_stats.pkl')).is_file() and \
        Path(os.path.join(data_folder, 'valid_batch_stats.pkl')).is_file() and \
        Path(os.path.join(data_folder, 'test_batch_stats.pkl')).is_file():
