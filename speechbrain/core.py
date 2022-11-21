@@ -982,6 +982,9 @@ class Brain:
         return loss.detach().cpu()
 
     def _fit_train(self, train_set, epoch, enable):
+        # Create a list of dict to store and read train batch stats from pickle
+        self.train_batch_stats = [{} for _ in range(len(train_set))] 
+        
         # Training stage
         self.on_stage_start(Stage.TRAIN, epoch)
         self.modules.train()
@@ -1003,12 +1006,12 @@ class Brain:
             dynamic_ncols=True,
             disable=not enable,
         ) as t:
-            for batch in t:
+            for batch_idx, batch in enumerate(t):
                 if self._optimizer_step_limit_exceeded:
                     logger.info("Train iteration limit exceeded")
                     break
                 self.step += 1
-                loss = self.fit_batch(batch)
+                loss = self.fit_batch(batch, batch_idx)
                 self.avg_train_loss = self.update_average(
                     loss, self.avg_train_loss
                 )
@@ -1047,15 +1050,18 @@ class Brain:
     def _fit_valid(self, valid_set, epoch, enable):
         # Validation stage
         if valid_set is not None:
+            # Create a list of dict to store and read valid batch stats from pickle
+            self.valid_batch_stats = [{} for _ in range(len(valid_set))] 
+            
             self.on_stage_start(Stage.VALID, epoch)
             self.modules.eval()
             avg_valid_loss = 0.0
             with torch.no_grad():
-                for batch in tqdm(
+                for batch_idx, batch in enumerate(tqdm(
                     valid_set, dynamic_ncols=True, disable=not enable
-                ):
+                )):
                     self.step += 1
-                    loss = self.evaluate_batch(batch, stage=Stage.VALID)
+                    loss = self.evaluate_batch(batch, batch_idx, stage=Stage.VALID)
                     avg_valid_loss = self.update_average(loss, avg_valid_loss)
 
                     # Profile only if desired (steps allow the profiler to know when all is warmed up)
@@ -1247,6 +1253,9 @@ class Brain:
         -------
         average test loss
         """
+        # Create a list of dict to store and read test batch stats from pickle
+        self.test_batch_stats = [{} for _ in range(len(test_set))] 
+        
         if progressbar is None:
             progressbar = not self.noprogressbar
 
@@ -1263,11 +1272,11 @@ class Brain:
         self.modules.eval()
         avg_test_loss = 0.0
         with torch.no_grad():
-            for batch in tqdm(
+            for batch_idx, batch in enumerate(tqdm(
                 test_set, dynamic_ncols=True, disable=not progressbar
-            ):
+            )):
                 self.step += 1
-                loss = self.evaluate_batch(batch, stage=Stage.TEST)
+                loss = self.evaluate_batch(batch, batch_idx, stage=Stage.TEST)
                 avg_test_loss = self.update_average(loss, avg_test_loss)
 
                 # Profile only if desired (steps allow the profiler to know when all is warmed up)
