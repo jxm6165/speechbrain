@@ -183,16 +183,14 @@ class InterleaveFormerASR(InterleaveFormerInterface):
 
         # rebatching: interleaving and repadding
         rebatch_sample, modalities = rebatch(src, tgt, audio_stats, text_stats)
-        print( f"{rebatch_sample.shape} {src.shape}" )
+        # print( f"{rebatch_sample.shape} {src.shape}" )
         (
             padding_mask,
             causal_mask, # causal for text, non-causal for audio.
         ) = self.make_masks(rebatch_sample, modalities, audio_stats, text_stats)
         # repeat each sample's causal mask by num_heads # of times.
-        logger.warn(torch.cat( causal_mask ).shape)
         # repeat each sample's causal mask by num_heads # of times.
         causal_mask = torch.cat( causal_mask ).repeat_interleave(repeats = self.nhead, dim = 0).to(rebatch_sample.device)
-        logger.warn(causal_mask.shape)
         padding_mask = padding_mask.to(rebatch_sample.device)
         
         # encoded_output is bi-modality learned representation.
