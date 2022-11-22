@@ -446,9 +446,9 @@ def dataio_prepare(hparams, have_pkl=True):
         test_datasets[name] = test_datasets[name].filtered_sorted(
             sort_key="duration"
         )
-
-    datasets = [train_data, valid_data] + [i for k, i in test_datasets.items()]
-    valtest_datasets = [valid_data] + [i for k, i in test_datasets.items()]
+    test_data = [i for k, i in test_datasets.items()]
+    datasets = [train_data, valid_data] + test_data
+    valtest_datasets = [valid_data] + test_data
 
     # We get the tokenizer as we need it to encode the labels when creating
     # mini-batches.
@@ -503,7 +503,7 @@ def dataio_prepare(hparams, have_pkl=True):
     
     # Generate segments if no stats pkl saved(Ours)
     # load an ASR model and CTC aligner
-    if not have_pkl:
+    if sum(have_pkl) < 3:
         pre_trained = "speechbrain/asr-transformer-transformerlm-librispeech"
         asr_model = EncoderDecoderASR.from_hparams(source=pre_trained)
         aligner = CTCSegmentation(asr_model, kaldi_style_text=False)
@@ -532,21 +532,47 @@ def dataio_prepare(hparams, have_pkl=True):
             token_seg_points = get_token_seg(wrd.split(' '))
             yield token_seg_points
 
-        sb.dataio.dataset.add_dynamic_item(datasets, generate_segments)
+        if have_pkl[0] == 0:
+            sb.dataio.dataset.add_dynamic_item([train_data], generate_segments)
+        if have_pkl[1] == 0:
+            sb.dataio.dataset.add_dynamic_item([valid_data], generate_segments)
+        if have_pkl[2] == 0:
+            sb.dataio.dataset.add_dynamic_item(test_data, generate_segments)
 
     # 4. Set output:
-    if not have_pkl:
-        # sb.dataio.dataset.set_output_keys(
-        #     [train_data], ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"]
-        # )
-        sb.dataio.dataset.set_output_keys(
-            datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens", 
-            "audio_seg_points", "token_seg_points"],
-        )
-    else:
+    if sum(have_pkl) == 3:
         sb.dataio.dataset.set_output_keys(
             datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"]
         )
+    else:
+        if have_pkl[0] == 0:
+            sb.dataio.dataset.set_output_keys(
+                [train_data], ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens",
+                "audio_seg_points", "token_seg_points"]
+            )
+        else:
+            sb.dataio.dataset.set_output_keys(
+                [train_data], ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"]
+            )
+        if have_pkl[1] == 0:
+            sb.dataio.dataset.set_output_keys(
+                [valid_data], ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens",
+                "audio_seg_points", "token_seg_points"]
+            )
+        else:
+            sb.dataio.dataset.set_output_keys(
+                [valid_data], ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"]
+            )
+        if have_pkl[2] == 0:
+            sb.dataio.dataset.set_output_keys(
+                test_data, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens",
+                "audio_seg_points", "token_seg_points"]
+            )
+        else:
+            sb.dataio.dataset.set_output_keys(
+                test_data, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"]
+            )
+        
 
     # 5. If Dynamic Batching is used, we instantiate the needed samplers.
     train_batch_sampler = None
@@ -621,12 +647,16 @@ if __name__ == "__main__":
     )
     
     # Check if stats pkl's are in data folder
-    have_pkl = False
+    have_pkl = [0, 0, 0]
     data_folder = hparams["data_folder"]
-    if Path(os.path.join(data_folder, 'train_batch_stats.pkl')).is_file() and \
-       Path(os.path.join(data_folder, 'valid_batch_stats.pkl')).is_file() and \
-       Path(os.path.join(data_folder, 'test_batch_stats.pkl')).is_file():
-        have_pkl = True
+    if Path(os.path.join(data_folder, 'train_batch_stats.pkl')).is_file():
+        have_pkl[0] = 1
+
+    if Path(os.path.join(data_folder, 'valid_batch_stats.pkl')).is_file():
+        have_pkl[1] = 1
+
+    if Path(os.path.join(data_folder, 'test_batch_stats.pkl')).is_file():
+        have_pkl[2] = 1
         
     # here we create the datasets objects as well as tokenization and encoding
     (
