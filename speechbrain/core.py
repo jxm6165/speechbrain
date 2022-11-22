@@ -995,7 +995,7 @@ class Brain:
             self.gen_pkl = False
         else:
             logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
-            self.train_batch_stats = [{} for _ in range(len(train_set))] 
+            self.train_batch_stats = {}
             self.gen_pkl = True
         
         # Training stage
@@ -1019,12 +1019,12 @@ class Brain:
             dynamic_ncols=True,
             disable=not enable,
         ) as t:
-            for batch_idx, batch in enumerate(t):
+            for batch in t:
                 if self._optimizer_step_limit_exceeded:
                     logger.info("Train iteration limit exceeded")
                     break
                 self.step += 1
-                loss = self.fit_batch(batch, batch_idx)
+                loss = self.fit_batch(batch)
                 self.avg_train_loss = self.update_average(
                     loss, self.avg_train_loss
                 )
@@ -1080,40 +1080,44 @@ class Brain:
                 self.gen_pkl = False
             else:
                 logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
-                self.valid_batch_stats = [{} for _ in range(len(valid_set))]
+                self.valid_batch_stats = {}
                 self.gen_pkl = True
             
             self.on_stage_start(Stage.VALID, epoch)
             self.modules.eval()
             avg_valid_loss = 0.0
             with torch.no_grad():
-                for batch_idx, batch in enumerate(tqdm(
-                    valid_set, dynamic_ncols=True, disable=not enable
-                )):
-                    self.step += 1
-                    loss = self.evaluate_batch(batch, batch_idx, stage=Stage.VALID)
-                    avg_valid_loss = self.update_average(loss, avg_valid_loss)
+                with tqdm(
+                    valid_set,
+                    dynamic_ncols=True,
+                    disable=not enable,
+                ) as t:
 
-                    # Profile only if desired (steps allow the profiler to know when all is warmed up)
-                    if self.profiler is not None:
-                        if self.profiler.record_steps:
-                            self.profiler.step()
+                    for batch in t:
+                        self.step += 1
+                        loss = self.evaluate_batch(batch, stage=Stage.VALID)
+                        avg_valid_loss = self.update_average(loss, avg_valid_loss)
 
-                    # Debug mode only runs a few batches
-                    if self.debug and self.step == self.debug_batches:
-                        break
+                        # Profile only if desired (steps allow the profiler to know when all is warmed up)
+                        if self.profiler is not None:
+                            if self.profiler.record_steps:
+                                self.profiler.step()
 
-                # Only run validation "on_stage_end" on main process
-                # save to pickle
-                if not stats_file.is_file():
-                    logger.info("%s saved in %s." % (OPT_FILE, save_opt))
-                    save_pkl(self.valid_batch_stats, save_opt)
-                    self.gen_pkl = False
-                self.step = 0
-                run_on_main(
-                    self.on_stage_end,
-                    args=[Stage.VALID, avg_valid_loss, epoch],
-                )
+                        # Debug mode only runs a few batches
+                        if self.debug and self.step == self.debug_batches:
+                            break
+
+                    # Only run validation "on_stage_end" on main process
+                    # save to pickle
+                    if not stats_file.is_file():
+                        logger.info("%s saved in %s." % (OPT_FILE, save_opt))
+                        save_pkl(self.valid_batch_stats, save_opt)
+                        self.gen_pkl = False
+                    self.step = 0
+                    run_on_main(
+                        self.on_stage_end,
+                        args=[Stage.VALID, avg_valid_loss, epoch],
+                    )
 
     def fit(
         self,
@@ -1298,7 +1302,7 @@ class Brain:
             self.gen_pkl = False
         else:
             logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
-            self.test_batch_stats = [{} for _ in range(len(test_set))] 
+            self.test_batch_stats = {}
             self.gen_pkl = True
         
         if progressbar is None:
@@ -1317,26 +1321,29 @@ class Brain:
         self.modules.eval()
         avg_test_loss = 0.0
         with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(
-                test_set, dynamic_ncols=True, disable=not progressbar
-            )):
-                self.step += 1
-                loss = self.evaluate_batch(batch, batch_idx, stage=Stage.TEST)
-                avg_test_loss = self.update_average(loss, avg_test_loss)
+            with tqdm(
+                test_set,
+                dynamic_ncols=True,
+                disable=not progressbar,
+            ) as t:
+                for batch in t:
+                    self.step += 1
+                    loss = self.evaluate_batch(batch, stage=Stage.TEST)
+                    avg_test_loss = self.update_average(loss, avg_test_loss)
 
-                # Profile only if desired (steps allow the profiler to know when all is warmed up)
-                if self.profiler is not None:
-                    if self.profiler.record_steps:
-                        self.profiler.step()
+                    # Profile only if desired (steps allow the profiler to know when all is warmed up)
+                    if self.profiler is not None:
+                        if self.profiler.record_steps:
+                            self.profiler.step()
 
-                # Debug mode only runs a few batches
-                if self.debug and self.step == self.debug_batches:
-                    break
+                    # Debug mode only runs a few batches
+                    if self.debug and self.step == self.debug_batches:
+                        break
 
-            # Only run evaluation "on_stage_end" on main process
-            run_on_main(
-                self.on_stage_end, args=[Stage.TEST, avg_test_loss, None]
-            )
+                # Only run evaluation "on_stage_end" on main process
+                run_on_main(
+                    self.on_stage_end, args=[Stage.TEST, avg_test_loss, None]
+                )
         self.step = 0
         # save to pickle
         if not stats_file.is_file():

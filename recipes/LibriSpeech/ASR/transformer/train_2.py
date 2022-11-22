@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 # Define training procedure
 class ASR(sb.core.Brain):
-    def compute_forward(self, batch, batch_idx, stage):
+    def compute_forward(self, batch, stage):
         """Forward computations from the waveform batches to the output probabilities."""
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
@@ -90,20 +90,20 @@ class ASR(sb.core.Brain):
 
             # save to batch_stats, which is a list of dicts. This will be used to store stats and read from pkl
             if stage == sb.Stage.TRAIN:
-                self.train_batch_stats[batch_idx] = stats_dict
+                self.train_batch_stats[str(batch.ids)] = stats_dict
             elif stage == sb.Stage.VALID:
-                self.valid_batch_stats[batch_idx] = stats_dict
+                self.valid_batch_stats[str(batch.ids)] = stats_dict
             elif stage == sb.Stage.TEST:
-                self.test_batch_stats[batch_idx] = stats_dict
+                self.test_batch_stats[str(batch.ids)] = stats_dict
         
         else:
             # read batch stats from pkl
             if stage == sb.Stage.TRAIN:
-                stats_dict = self.train_batch_stats[batch_idx]
+                stats_dict = self.train_batch_stats[str(batch.ids)]
             elif stage == sb.Stage.VALID:
-                stats_dict = self.valid_batch_stats[batch_idx]
+                stats_dict = self.valid_batch_stats[str(batch.ids)]
             elif stage == sb.Stage.TEST:
-                stats_dict = self.test_batch_stats[batch_idx]
+                stats_dict = self.test_batch_stats[str(batch.ids)]
             
             audio_stats = stats_dict["audio_stats"]
             batch_token_seg_bos = stats_dict["batch_token_seg_bos"]
@@ -114,6 +114,10 @@ class ASR(sb.core.Brain):
         
         # batch_tokens_len is  batch.tokens_len
         seg_stats = [audio_stats, text_stats]
+        logger.warn(src.shape)
+        logger.warn(batch_token_seg_bos.shape)
+        logger.warn(audio_stats.shape)
+        logger.warn(text_stats.shape)
 
         # enc_out is the audio representation + text representation
         encoded_output, modalities = self.modules.Transformer(
@@ -158,9 +162,10 @@ class ASR(sb.core.Brain):
                 hyps, _ = self.hparams.valid_search(audio_representation.detach(), src.detach(), wav_lens)
         elif stage == sb.Stage.TEST:
             hyps, _ = self.hparams.test_search( audio_representation.detach(), src.detach(), wav_lens)
-
+        
         return p_ctc, p_seq, wav_lens, hyps, batch_token_seg_eos, torch.tensor( batch_tokens_eos_len).to(encoded_output.device)
-    
+
+
     def segment_eos_bos(self, token_bos, text_stats):
         """input token_bos as example. Reformulate token_bos, token_eos, text_stats"""
         batch_size, _ = text_stats.shape
@@ -224,7 +229,7 @@ class ASR(sb.core.Brain):
 
         ids = batch.id
         # tokens_eos, tokens_eos_lens = batch.tokens_eos
-        tokens, tokens_lens = batch.tokens 
+        tokens, tokens_lens = batch.tokens
 
         if hasattr(self.modules, "env_corrupt") and stage == sb.Stage.TRAIN:
             tokens_eos = torch.cat([tokens_eos, tokens_eos], dim=0)
@@ -283,14 +288,13 @@ class ASR(sb.core.Brain):
         
         return audio_stats, token_stats
 
-    def fit_batch(self, batch, batch_idx):
-
+    def fit_batch(self, batch):
         should_step = self.step % self.grad_accumulation_factor == 0
         # Managing automatic mixed precision
         if self.auto_mix_prec:
             self.optimizer.zero_grad()
             with torch.cuda.amp.autocast():
-                outputs = self.compute_forward(batch, batch_idx, sb.Stage.TRAIN)
+                outputs = self.compute_forward(batch, sb.Stage.TRAIN)
                 loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
             self.scaler.scale(loss / self.grad_accumulation_factor).backward()
             if should_step:
@@ -303,7 +307,7 @@ class ASR(sb.core.Brain):
                 # anneal lr every update
                 self.hparams.noam_annealing(self.optimizer)
         else:
-            outputs = self.compute_forward(batch, batch_idx, sb.Stage.TRAIN)
+            outputs = self.compute_forward(batch, sb.Stage.TRAIN)
             loss = self.compute_objectives(outputs, batch, sb.Stage.TRAIN)
             (loss / self.grad_accumulation_factor).backward()
             if should_step:
@@ -317,10 +321,10 @@ class ASR(sb.core.Brain):
 
         return loss.detach().cpu()
 
-    def evaluate_batch(self, batch, batch_idx, stage):
+    def evaluate_batch(self, batch, stage):
         """Computations needed for validation/test batches"""
         with torch.no_grad():
-            predictions = self.compute_forward(batch, batch_idx, stage=stage)
+            predictions = self.compute_forward(batch, stage=stage)
             loss = self.compute_objectives(predictions, batch, stage=stage)
         return loss.detach()
 
@@ -536,6 +540,9 @@ def dataio_prepare(hparams, have_pkl=True):
 
     # 4. Set output:
     if not have_pkl:
+        # sb.dataio.dataset.set_output_keys(
+        #     [train_data], ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"]
+        # )
         sb.dataio.dataset.set_output_keys(
             datasets, ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens", 
             "audio_seg_points", "token_seg_points"],
