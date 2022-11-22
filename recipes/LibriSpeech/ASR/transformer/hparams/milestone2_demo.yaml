@@ -52,7 +52,7 @@ ctc_weight: 0.3
 grad_accumulation_factor: 2
 max_grad_norm: 5.0
 loss_reduction: 'batchmean'
-sorting: ascending
+sorting: descending
 
 dynamic_batching: False
 
