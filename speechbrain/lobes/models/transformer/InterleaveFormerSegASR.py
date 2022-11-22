@@ -16,8 +16,10 @@ from speechbrain.lobes.models.transformer.InterleaveFormerSeg import (
     NormalizedEmbedding,
 )
 from speechbrain.nnet.activations import Swish
+import logging
 # from speechbrain.dataio.dataio import length_to_mask
 
+logger = logging.getLogger(__name__)
 
 class InterleaveFormerASR(InterleaveFormerInterface):
     """This is an implementation of InterleaveFormer model for ASR.
@@ -181,11 +183,12 @@ class InterleaveFormerASR(InterleaveFormerInterface):
 
         # rebatching: interleaving and repadding
         rebatch_sample, modalities = rebatch(src, tgt, audio_stats, text_stats)
-        print( f"{rebatch_sample.shape} {src.shape}" )
+        # print( f"{rebatch_sample.shape} {src.shape}" )
         (
             padding_mask,
             causal_mask, # causal for text, non-causal for audio.
         ) = self.make_masks(rebatch_sample, modalities, audio_stats, text_stats)
+        # repeat each sample's causal mask by num_heads # of times.
         # repeat each sample's causal mask by num_heads # of times.
         causal_mask = torch.cat( causal_mask ).repeat_interleave(repeats = self.nhead, dim = 0).to(rebatch_sample.device)
         padding_mask = padding_mask.to(rebatch_sample.device)
@@ -235,23 +238,22 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             num_seg = len( set( audio_stats[sample_idx] ) )
             # print(f"sample {sample_idx} has {num_seg} # of segments")
             # print("modality indicator:", modalities[sample_idx])
-            for idx in range(  num_seg ):
-                # do unmask operation
-                start_idx = 0
-                end_idx = audio_stats[sample_idx][idx]
-                if idx > 0:
-                    # consider all the past audio and text for start
-                    start_idx =  audio_stats[sample_idx][idx-1] + text_stats[sample_idx][idx-1]
-                    # consider all the past audio/text + current audio
-                    end_idx = audio_stats[sample_idx][idx] + text_stats[sample_idx][idx-1]
-                hopping_causal_mask = unmask( hopping_causal_mask, start_idx, end_idx) 
-                # print("Unmasking current audio\n", hopping_causal_mask, "\n")
-                if num_seg == 1:
-                    # if only 1 segment, no need to do mask operation for past audio (there's no past)
-                    # print("No need to mask past audio\n")
-                    final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
-                    break
-                else:
+            if num_seg == 1:
+                final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
+                break
+            else:
+                for idx in range(  num_seg ):
+                    # do unmask operation
+                    start_idx = 0
+                    end_idx = audio_stats[sample_idx][idx]
+                    if idx > 0:
+                        # consider all the past audio and text for start
+                        start_idx =  audio_stats[sample_idx][idx-1] + text_stats[sample_idx][idx-1]
+                        # consider all the past audio/text + current audio
+                        end_idx = audio_stats[sample_idx][idx] + text_stats[sample_idx][idx-1]
+                    hopping_causal_mask = unmask( hopping_causal_mask, start_idx, end_idx) 
+                    # print("Unmasking current audio\n", hopping_causal_mask, "\n")
+                        
                     # do mask operation
                     delta = text_stats[sample_idx][idx]
                     if idx > 0:
