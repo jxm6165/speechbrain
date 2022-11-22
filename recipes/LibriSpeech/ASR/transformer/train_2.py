@@ -114,10 +114,6 @@ class ASR(sb.core.Brain):
         
         # batch_tokens_len is  batch.tokens_len
         seg_stats = [audio_stats, text_stats]
-        logger.warn(src.shape)
-        logger.warn(batch_token_seg_bos.shape)
-        logger.warn(audio_stats.shape)
-        logger.warn(text_stats.shape)
 
         # enc_out is the audio representation + text representation
         encoded_output, modalities = self.modules.Transformer(
