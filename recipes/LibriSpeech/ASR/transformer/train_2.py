@@ -90,20 +90,20 @@ class ASR(sb.core.Brain):
 
             # save to batch_stats, which is a list of dicts. This will be used to store stats and read from pkl
             if stage == sb.Stage.TRAIN:
-                self.train_batch_stats[str(batch.ids)] = stats_dict
+                self.train_batch_stats[str(batch.id)] = stats_dict
             elif stage == sb.Stage.VALID:
-                self.valid_batch_stats[str(batch.ids)] = stats_dict
+                self.valid_batch_stats[str(batch.id)] = stats_dict
             elif stage == sb.Stage.TEST:
-                self.test_batch_stats[str(batch.ids)] = stats_dict
+                self.test_batch_stats[str(batch.id)] = stats_dict
         
         else:
             # read batch stats from pkl
             if stage == sb.Stage.TRAIN:
-                stats_dict = self.train_batch_stats[str(batch.ids)]
+                stats_dict = self.train_batch_stats[str(batch.id)]
             elif stage == sb.Stage.VALID:
-                stats_dict = self.valid_batch_stats[str(batch.ids)]
+                stats_dict = self.valid_batch_stats[str(batch.id)]
             elif stage == sb.Stage.TEST:
-                stats_dict = self.test_batch_stats[str(batch.ids)]
+                stats_dict = self.test_batch_stats[str(batch.id)]
             
             audio_stats = stats_dict["audio_stats"]
             batch_token_seg_bos = stats_dict["batch_token_seg_bos"]
