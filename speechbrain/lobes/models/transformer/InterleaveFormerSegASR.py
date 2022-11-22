@@ -240,23 +240,22 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             num_seg = len( set( audio_stats[sample_idx] ) )
             # print(f"sample {sample_idx} has {num_seg} # of segments")
             # print("modality indicator:", modalities[sample_idx])
-            for idx in range(  num_seg ):
-                # do unmask operation
-                start_idx = 0
-                end_idx = audio_stats[sample_idx][idx]
-                if idx > 0:
-                    # consider all the past audio and text for start
-                    start_idx =  audio_stats[sample_idx][idx-1] + text_stats[sample_idx][idx-1]
-                    # consider all the past audio/text + current audio
-                    end_idx = audio_stats[sample_idx][idx] + text_stats[sample_idx][idx-1]
-                hopping_causal_mask = unmask( hopping_causal_mask, start_idx, end_idx) 
-                # print("Unmasking current audio\n", hopping_causal_mask, "\n")
-                if num_seg == 1:
-                    # if only 1 segment, no need to do mask operation for past audio (there's no past)
-                    # print("No need to mask past audio\n")
-                    final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
-                    break
-                else:
+            if num_seg == 1:
+                final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
+                break
+            else:
+                for idx in range(  num_seg ):
+                    # do unmask operation
+                    start_idx = 0
+                    end_idx = audio_stats[sample_idx][idx]
+                    if idx > 0:
+                        # consider all the past audio and text for start
+                        start_idx =  audio_stats[sample_idx][idx-1] + text_stats[sample_idx][idx-1]
+                        # consider all the past audio/text + current audio
+                        end_idx = audio_stats[sample_idx][idx] + text_stats[sample_idx][idx-1]
+                    hopping_causal_mask = unmask( hopping_causal_mask, start_idx, end_idx) 
+                    # print("Unmasking current audio\n", hopping_causal_mask, "\n")
+                        
                     # do mask operation
                     delta = text_stats[sample_idx][idx]
                     if idx > 0:
