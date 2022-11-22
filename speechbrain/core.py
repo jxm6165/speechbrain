@@ -1341,15 +1341,16 @@ class Brain:
                         break
 
                 # Only run evaluation "on_stage_end" on main process
+                # save to pickle
+                if not stats_file.is_file():
+                    logger.info("%s saved in %s." % (OPT_FILE, save_opt))
+                    save_pkl(self.test_batch_stats, save_opt)
+                    self.gen_pkl = False
                 run_on_main(
                     self.on_stage_end, args=[Stage.TEST, avg_test_loss, None]
                 )
         self.step = 0
-        # save to pickle
-        if not stats_file.is_file():
-            logger.info("%s saved in %s." % (OPT_FILE, save_opt))
-            save_pkl(self.test_batch_stats, save_opt)
-            self.gen_pkl = False
+        
             
         return avg_test_loss
 
