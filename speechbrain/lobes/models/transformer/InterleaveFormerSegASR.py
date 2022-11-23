@@ -189,7 +189,6 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             causal_mask, # causal for text, non-causal for audio.
         ) = self.make_masks(rebatch_sample, modalities, audio_stats, text_stats)
         # repeat each sample's causal mask by num_heads # of times.
-        # repeat each sample's causal mask by num_heads # of times.
         causal_mask = torch.cat( causal_mask ).repeat_interleave(repeats = self.nhead, dim = 0).to(rebatch_sample.device)
         padding_mask = padding_mask.to(rebatch_sample.device)
         
@@ -247,7 +246,6 @@ class InterleaveFormerASR(InterleaveFormerInterface):
                     # consider all the past audio/text + current audio
                     end_idx = audio_stats[sample_idx][idx] + text_stats[sample_idx][idx-1]
                 hopping_causal_mask = unmask( hopping_causal_mask, start_idx, end_idx) 
-                
                 if num_seg == 1:
                     # if there's 1 segment, do unmask but no need for masking
                     final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
@@ -271,8 +269,9 @@ class InterleaveFormerASR(InterleaveFormerInterface):
         return padding_mask, final_mask
 
     @torch.no_grad()
-    def decode(self, tgt, src, wave_len, enc_len=None):
-        """This method implements a decoding step for the InterleaveFormer model.
+    def decode_oracle(self, tgt, src, seg_stats, enc_len=None):
+        """This method implements a decoding step for the InterleaveFormerSeg model.
+        The segmentation is given by pre-processing, known as oracle.
         Arguments
         ---------
         tgt : torch.Tensor
@@ -283,30 +282,25 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             Not used. 
             The actual length of encoder states.
         """
-        assert False, f"Need to rewrite this"
+        assert False, f"Even with oracle audio split, need to updates audio stats/text state every time"
+        audio_stats, text_stats = seg_stats
         if src.ndim == 4:
             bz, t, ch1, ch2 = src.shape
             src = src.reshape(bz, t, ch1 * ch2)
 
         _, max_audio, _ = src.shape
-        bin_width, max_text, = tgt.shape # bin_width x 1 becaues each time 1 token but consider bin_width # of possibility in beam search
-        seg_stats = [max_audio, max_text]
-
-        (
-            src_key_padding_mask,
-            tgt_key_padding_mask,
-            src_mask,
-            tgt_mask, # this one could be the hopping causal mask! Postponed right now.
-        ) = self.make_masks(src, tgt, wave_len, seg_stats)
+        beam_width, max_text, = tgt.shape # bin_width x 1 becaues each time 1 token but consider bin_width # of possibility in beam search
 
         src = self.custom_src_module(src)
+        # src has batch size of 1, make it match with beam width
+        src = src.repeat(beam_width,1,1).clone()
+
         # add pos encoding to queries if are sinusoidal ones else
         if self.attention_type == "RelPosMHAXL":
             pos_embs_encoder = self.positional_encoding(src)
         elif self.positional_encoding_type == "fixed_abs_sine":
             src = src + self.positional_encoding(src)  # add the encodings here
             pos_embs_encoder = None
-
 
         tgt = self.custom_tgt_module(tgt)
         if self.attention_type == "RelPosMHAXL":
@@ -317,11 +311,16 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             pos_embs_target = None
             pos_embs_encoder = None
 
-        # souce has batch_size (which is 1) x horizon x feature where tgt is bin_size x horizon
-        # Make them match in the first dimension! 
-        final_src = torch.cat([src.repeat(bin_width,1,1), tgt], dim = 1)
-        # assert False, f"wave: {wave_len} {src_key_padding_mask.shape} {tgt.shape} {tgt_key_padding_mask.shape} {tgt_mask.shape} "
-        final_padding_mask = torch.cat([src_key_padding_mask.repeat(bin_width,1), tgt_key_padding_mask], dim = 1)
+        # rebatching: interleaving and repadding
+        rebatch_sample, modalities = rebatch(src, tgt, audio_stats, text_stats)
+        # print( f"{rebatch_sample.shape} {src.shape}" )
+        (
+            padding_mask,
+            causal_mask, # causal for text, non-causal for audio.
+        ) = self.make_masks(rebatch_sample, modalities, audio_stats, text_stats)
+        # repeat each sample's causal mask by num_heads # of times.
+        causal_mask = torch.cat( causal_mask ).repeat_interleave(repeats = self.nhead, dim = 0).to(rebatch_sample.device)
+        padding_mask = padding_mask.to(rebatch_sample.device)
 
         # encoded_output is bi-modality learned representation.
         encoded_output, attn = self.encoder(
