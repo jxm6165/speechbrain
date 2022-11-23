@@ -238,7 +238,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             num_seg = len( set( audio_stats[sample_idx] ) )
             
             for idx in range(  num_seg ):
-                # do unmask operation
+                # do unmask operation for each audio segment
                 start_idx = 0
                 end_idx = audio_stats[sample_idx][idx]
                 if idx > 0:
@@ -247,8 +247,9 @@ class InterleaveFormerASR(InterleaveFormerInterface):
                     # consider all the past audio/text + current audio
                     end_idx = audio_stats[sample_idx][idx] + text_stats[sample_idx][idx-1]
                 hopping_causal_mask = unmask( hopping_causal_mask, start_idx, end_idx) 
-                # print("Unmasking current audio\n", hopping_causal_mask, "\n")
+                
                 if num_seg == 1:
+                    # if there's 1 segment, do unmask but no need for masking
                     final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
                     break
                 else:
@@ -258,13 +259,12 @@ class InterleaveFormerASR(InterleaveFormerInterface):
                         delta -= text_stats[sample_idx][idx-1]
                     start_row_idx = end_idx + (delta )
                     if start_row_idx < len(modalities[sample_idx]):
-                        # make sure unnecessary masking is not done 
-                        hopping_causal_mask = mask( hopping_causal_mask, start_row_idx, start_idx, end_idx) 
-                        # print("Start masking audio from row idx:", start_row_idx)
-                        # print("Masking past audio\n", hopping_causal_mask, "\n")
+                        # mask the past audio + bos (i.e. end_idx + 1)
+                        hopping_causal_mask = mask( hopping_causal_mask, start_row_idx, start_idx, end_idx + 1) 
+
             if num_seg > 1:
-                # for seg_num == 1, only unmask is needed for audio
-                # for seg_num > 1, need unmask,unmask
+                # for seg_num == 1, only unmask is needed for audio, mask has been appended.
+                # for seg_num > 1, need unmask,unmask. Append here.
                 final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
         
         padding_mask = modalities == 0
