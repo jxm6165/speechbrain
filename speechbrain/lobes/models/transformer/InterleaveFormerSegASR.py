@@ -264,7 +264,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
 
             if num_seg > 1:
                 # for seg_num == 1, only unmask is needed for audio, mask has been appended.
-                # for seg_num > 1, need unmask,unmask. Append here.
+                # for seg_num > 1, need unmask,mask. Append here.
                 final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
         
         padding_mask = modalities == 0
