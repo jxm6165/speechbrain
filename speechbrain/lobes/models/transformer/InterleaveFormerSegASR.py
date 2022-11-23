@@ -236,24 +236,22 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             hopping_causal_mask = normal_causal_mask.clone()
             # number segment == unique element in an array
             num_seg = len( set( audio_stats[sample_idx] ) )
-            # print(f"sample {sample_idx} has {num_seg} # of segments")
-            # print("modality indicator:", modalities[sample_idx])
-            if num_seg == 1:
-                final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
-                break
-            else:
-                for idx in range(  num_seg ):
-                    # do unmask operation
-                    start_idx = 0
-                    end_idx = audio_stats[sample_idx][idx]
-                    if idx > 0:
-                        # consider all the past audio and text for start
-                        start_idx =  audio_stats[sample_idx][idx-1] + text_stats[sample_idx][idx-1]
-                        # consider all the past audio/text + current audio
-                        end_idx = audio_stats[sample_idx][idx] + text_stats[sample_idx][idx-1]
-                    hopping_causal_mask = unmask( hopping_causal_mask, start_idx, end_idx) 
-                    # print("Unmasking current audio\n", hopping_causal_mask, "\n")
-                        
+            
+            for idx in range(  num_seg ):
+                # do unmask operation
+                start_idx = 0
+                end_idx = audio_stats[sample_idx][idx]
+                if idx > 0:
+                    # consider all the past audio and text for start
+                    start_idx =  audio_stats[sample_idx][idx-1] + text_stats[sample_idx][idx-1]
+                    # consider all the past audio/text + current audio
+                    end_idx = audio_stats[sample_idx][idx] + text_stats[sample_idx][idx-1]
+                hopping_causal_mask = unmask( hopping_causal_mask, start_idx, end_idx) 
+                # print("Unmasking current audio\n", hopping_causal_mask, "\n")
+                if num_seg == 1:
+                    final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
+                    break
+                else:
                     # do mask operation
                     delta = text_stats[sample_idx][idx]
                     if idx > 0:
@@ -264,8 +262,10 @@ class InterleaveFormerASR(InterleaveFormerInterface):
                         hopping_causal_mask = mask( hopping_causal_mask, start_row_idx, start_idx, end_idx) 
                         # print("Start masking audio from row idx:", start_row_idx)
                         # print("Masking past audio\n", hopping_causal_mask, "\n")
-
-            final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
+            if num_seg > 1:
+                # for seg_num == 1, only unmask is needed for audio
+                # for seg_num > 1, need unmask,unmask
+                final_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
         
         padding_mask = modalities == 0
         return padding_mask, final_mask
