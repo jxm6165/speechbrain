@@ -4,7 +4,9 @@ Authors
 """
 
 import torch  # noqa 42
+import numpy as np
 from torch import nn
+from torch.nn.utils.rnn import pad_sequence
 from typing import Optional
 from speechbrain.nnet.linear import Linear
 from speechbrain.nnet.containers import ModuleList
@@ -14,6 +16,7 @@ from speechbrain.lobes.models.transformer.InterleaveFormerSeg import (
     mask,
     unmask,
     NormalizedEmbedding,
+    get_lookahead_hopping_mask
 )
 from speechbrain.nnet.activations import Swish
 import logging
@@ -269,31 +272,44 @@ class InterleaveFormerASR(InterleaveFormerInterface):
         return padding_mask, final_mask
 
     @torch.no_grad()
-    def decode_oracle(self, tgt, src, seg_stats, enc_len=None):
+    def decode_oracle(self, history, src, memory, enc_len=None):
         """This method implements a decoding step for the InterleaveFormerSeg model.
         The segmentation is given by pre-processing, known as oracle.
         Arguments
         ---------
-        tgt : torch.Tensor
-            The sequence to the decoder.
+        history: torch.Tensor
+            past transcriptions associated with past audio segments
         src : torch.Tensor
             Raw audio instead of encoded audio.
-        enc_len : torch.LongTensor
-            Not used. 
-            The actual length of encoder states.
+        memory: torch.Tensor
+            keep track of all text inputs for current segment
+        memory_len : torch.LongTensor
+            The actual length of the memory
         """
-        assert False, f"Even with oracle audio split, need to updates audio stats/text state every time"
-        audio_stats, text_stats = seg_stats
+
+        # assert False, f"Even with oracle audio split, need to updates audio stats/text state every time"
         if src.ndim == 4:
             bz, t, ch1, ch2 = src.shape
             src = src.reshape(bz, t, ch1 * ch2)
-
+        
         _, max_audio, _ = src.shape
-        beam_width, max_text, = tgt.shape # bin_width x 1 becaues each time 1 token but consider bin_width # of possibility in beam search
+        beam_width, max_text, = memory.shape # bin_width x 1 becaues each time 1 token but consider bin_width # of possibility in beam search
+
+        # pad history
+        history_len = [ len(h) for h in history]
+        max_hist_len = max(history_len)
+        history_pad_mask = []
+        histories = []
+        for h_idx, h in enumerate(history):
+            histories.append( torch.tensor(h).to(src.device) )
+            h_mask = np.array( [False]* history_len[h_idx] + [True] * (max_hist_len - history_len[h_idx]))
+            history_pad_mask.append( h_mask  )
+
+        history_pad_mask = np.array(history_pad_mask)
+        history_pad_mask = torch.tensor(history_pad_mask).to(src.device).view(beam_width, -1)
+        histories = pad_sequence( histories , batch_first=True ).to(src.device)
 
         src = self.custom_src_module(src)
-        # src has batch size of 1, make it match with beam width
-        src = src.repeat(beam_width,1,1).clone()
 
         # add pos encoding to queries if are sinusoidal ones else
         if self.attention_type == "RelPosMHAXL":
@@ -301,7 +317,8 @@ class InterleaveFormerASR(InterleaveFormerInterface):
         elif self.positional_encoding_type == "fixed_abs_sine":
             src = src + self.positional_encoding(src)  # add the encodings here
             pos_embs_encoder = None
-
+        # jointly emb memory and history as tgt
+        tgt = torch.cat([histories, memory], dim = 1)
         tgt = self.custom_tgt_module(tgt)
         if self.attention_type == "RelPosMHAXL":
             # we use fixed positional encodings in the decoder
@@ -310,27 +327,39 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             tgt = tgt + self.positional_encoding(tgt)  # add the encodings here
             pos_embs_target = None
             pos_embs_encoder = None
+        # split them back to histories and memory
+        histories = tgt[:, :max_hist_len]
+        tgt = tgt[:, max_hist_len: ]
+        
+        # final padding mask
+        # in the case of batch_size = 1, within each segment, there shouldn't be any padding
+        src_padding_mask = torch.zeros( src.shape[:2] ).bool().to(src.device)
+        # assert False, f"Check tgt has eos from previous seg or not\n: {( tgt == 2)}"
+        # tgt is memory. In fact, no need to padding since they syncronously grow
+        # however, eos may exist and thus need to be ignored, thus use "padding" here
+        tgt_padding_mask = ( memory == 2).to(src.device) # 2 is the bos index
+        final_padding_mask = torch.cat([history_pad_mask, src_padding_mask,tgt_padding_mask ], dim = 1).to(src.device).bool()
 
-        # rebatching: interleaving and repadding
-        rebatch_sample, modalities = rebatch(src, tgt, audio_stats, text_stats)
-        # print( f"{rebatch_sample.shape} {src.shape}" )
-        (
-            padding_mask,
-            causal_mask, # causal for text, non-causal for audio.
-        ) = self.make_masks(rebatch_sample, modalities, audio_stats, text_stats)
-        # repeat each sample's causal mask by num_heads # of times.
-        causal_mask = torch.cat( causal_mask ).repeat_interleave(repeats = self.nhead, dim = 0).to(rebatch_sample.device)
-        padding_mask = padding_mask.to(rebatch_sample.device)
+        # final src and its causal mask, simple hopping style
+        final_src = torch.cat([histories, src, tgt], dim = 1).to(src.device)
+        seg_stats = [histories.shape[1] + src.shape[1], -1] # 2nd element is not used
+        # the mask shared across all attn head and across the batch_dim (i.e. beam_side heres)
+        causal_mask = get_lookahead_hopping_mask(final_src, seg_stats).float()
+
+        modalities = 2 * torch.ones(final_src.shape[:2]).to(final_src.device)
+        # current audio is set to 1, others are 2 indicating text modality
+        modalities[:, histories.shape[1]: seg_stats[0] ] = 1
 
         # encoded_output is bi-modality learned representation.
         encoded_output, attn = self.encoder(
-            src=final_src,
-            seg_stats = seg_stats, # used by modality expert
-            src_mask=tgt_mask, # this must be a causal mask, hopping style
-            src_key_padding_mask=final_padding_mask,
+            src= final_src,
+            modalities = modalities, # used by modality expert
+            src_mask= causal_mask, # this must be a causal mask, hopping style
+            src_key_padding_mask= final_padding_mask,
             pos_embs=pos_embs_encoder,
         )
-        prediction = encoded_output[:, max_audio: ]
+
+        prediction = encoded_output[:, seg_stats[0]: ]
         return prediction, attn[-1]
 
     def _init_params(self):
