@@ -509,6 +509,75 @@ class S2SBeamSearcher(S2SBaseSearcher):
                 )
                 hyps_and_scores[batch_id].append((hyp, log_probs, final_scores))
         return is_eos
+    
+    def _update_hyp_and_scores_seg(
+        self,
+        last_seg,
+        history,
+        inp_tokens,
+        alived_seq,
+        alived_log_probs,
+        hyps_and_scores,
+        scores,
+        timesteps,
+    ):
+        """This method will update hyps and scores if inp_tokens are eos.
+
+        Arguments
+        ---------
+        last_seg: bool
+            If True, then termiantes the search with eos.
+            Otherwise, keep the hyp alive for the future segment.
+        history: list of list
+            if eos of current segment but not reaching the last segment,
+            history will be updated. Model will take this as representative
+            of past audio.s
+        inp_tokens : torch.Tensor
+            The current output.
+        alived_seq : torch.Tensor
+            The tensor to store the alived_seq.
+        alived_log_probs : torch.Tensor
+            The tensor to store the alived_log_probs.
+        hyps_and_scores : list
+            To store generated hypotheses and scores.
+        scores : torch.Tensor
+            The final scores of beam search.
+        timesteps : float
+            The current timesteps. This is for length rewarding.
+
+        Returns
+        -------
+        is_eos : torch.BoolTensor
+            Each element represents whether the token is eos.
+        """
+        is_eos = inp_tokens.eq(self.eos_index)
+        (eos_indices,) = torch.nonzero(is_eos, as_tuple=True)
+
+        # Store the hypothesis and their scores when reaching eos.
+        if eos_indices.shape[0] > 0:
+            for index in eos_indices:
+                # convert to int
+                index = index.item()
+                batch_id = torch.div(
+                    index, self.beam_size, rounding_mode="floor"
+                )
+                if len(hyps_and_scores[batch_id]) == self.beam_size:
+                    continue
+                hyp = alived_seq[index, :]
+                if last_seg:
+                    log_probs = alived_log_probs[index, :]
+                    final_scores = scores[index] + self.length_rewarding * (
+                        timesteps + 1
+                    )
+                    hyps_and_scores[batch_id].append((hyp, log_probs, final_scores))
+                else:
+                    hist =  hyp.cpu().numpy()
+                    if self.eos_index in hist:
+                        hist = hist[hist != self.eos_index]
+                    # print("Check hist:", hist)
+                    # print("Check current history:", history)
+                    history[index] += list( hist )
+        return torch.logical_and(is_eos, torch.tensor(last_seg).to(is_eos.device) )
 
     def _get_top_score_prediction(self, hyps_and_scores, topk):
         """This method sorts the scores and return corresponding hypothesis and log probs.
@@ -1245,6 +1314,25 @@ def _update_mem(inp_tokens, memory):
         return inp_tokens.unsqueeze(1)
     return torch.cat([memory, inp_tokens.unsqueeze(1)], dim=-1)
 
+def _update_mem_seg(inp_tokens, memory):
+    """This function is for updating the memory for transformer searches.
+    it is called at each decoding step. When being called, it appends the
+    predicted token of the previous step to existing memory (it may contain eos
+    from previous segment )
+
+    Besides, manually set first column as bos if needed
+
+    Arguments:
+    -----------
+    inp_tokens : tensor
+        Predicted token of the previous decoding step.
+    memory : tensor
+        Contains all the predicted tokens.
+    """
+    if memory is None:
+        return inp_tokens.unsqueeze(1)
+
+    return torch.cat([memory, inp_tokens.unsqueeze(1)], dim=-1)
 
 class S2STransformerBeamSearch(S2SBeamSearcher):
     """This class implements the beam search decoding
@@ -1540,6 +1628,7 @@ class CentralizedBeamSearcher(S2SBeamSearcher):
                 log_probs[:, self.eos_index] = self.minus_inf
 
             # Set the eos prob to minus_inf when it doesn't exceed threshold.
+            # not used both for test/valid search
             if self.using_eos_threshold:
                 cond = self._check_eos_threshold(log_probs)
                 log_probs[:, self.eos_index] = mask_by_condition(
@@ -1618,6 +1707,7 @@ class CentralizedBeamSearcher(S2SBeamSearcher):
                 )
 
             # Add coverage penalty
+            # Not usesd
             if self.coverage_penalty > 0:
                 cur_attn = torch.index_select(attn, dim=0, index=predecessors)
 
@@ -1679,7 +1769,7 @@ class CentralizedBeamSearcher(S2SBeamSearcher):
                 timesteps=t,
             )
 
-            # Block the paths that have reached eos.
+            # Block the paths that have reached eos and it is the last segment
             sequence_scores.masked_fill_(is_eos, float("-inf"))
 
         if not self._check_full_beams(hyps_and_scores, self.beam_size):
@@ -1768,6 +1858,551 @@ class InterleaveFormerBeamSearch(CentralizedBeamSearcher):
         memory = _update_mem(inp_tokens, memory)
         # src is passed in, instead of a piece of encoded audio
         pred, attn = self.model.decode(memory, src, wave_len = wav_len)
+        prob_dist = self.softmax(self.fc(pred) / self.temperature)
+        return prob_dist[:, -1, :], memory, attn
+
+    def lm_forward_step(self, inp_tokens, memory):
+        """Performs a step in the implemented LM module."""
+        memory = _update_mem(inp_tokens, memory)
+        if not next(self.lm_modules.parameters()).is_cuda:
+            self.lm_modules.to(inp_tokens.device)
+        logits = self.lm_modules(memory)
+        log_probs = self.softmax(logits / self.temperature_lm)
+        return log_probs[:, -1, :], memory
+
+class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
+    """This class implements the beam-search algorithm for the seq2seq model.
+    See also S2SBaseSearcher().
+    Arguments
+    ---------
+    bos_index : int
+        The index of beginning-of-sequence token.
+    eos_index : int
+        The index of end-of-sequence token.
+    min_decode_radio : float
+        The ratio of minimum decoding steps to length of encoder states.
+    max_decode_radio : float
+        The ratio of maximum decoding steps to length of encoder states.
+    beam_size : int
+        The width of beam.
+    topk : int
+        The number of hypothesis to return. (default: 1)
+    return_log_probs : bool
+        Whether to return log-probabilities. (default: False)
+    using_eos_threshold : bool
+        Whether to use eos threshold. (default: true)
+    eos_threshold : float
+        The threshold coefficient for eos token (default: 1.5). See 3.1.2 in
+        reference: https://arxiv.org/abs/1904.02619
+    length_normalization : bool
+        Whether to divide the scores by the length. (default: True)
+    length_rewarding : float
+        The coefficient of length rewarding (γ).
+        log P(y|x) + λ log P_LM(y) + γ*len(y). (default: 0.0)
+    coverage_penalty: float
+        The coefficient of coverage penalty (η).
+        log P(y|x) + λ log P_LM(y) + γ*len(y) + η*coverage(x,y). (default: 0.0)
+        Reference: https://arxiv.org/pdf/1612.02695.pdf, https://arxiv.org/pdf/1808.10792.pdf
+    lm_weight : float
+        The weight of LM when performing beam search (λ).
+        log P(y|x) + λ log P_LM(y). (default: 0.0)
+    ctc_weight : float
+        The weight of CTC probabilities when performing beam search (λ).
+        (1-λ) log P(y|x) + λ log P_CTC(y|x). (default: 0.0)
+    blank_index : int
+        The index of the blank token.
+    ctc_score_mode: str
+        Default: "full"
+        CTC prefix scoring on "partial" token or "full: token.
+    ctc_window_size: int
+        Default: 0
+        Compute the ctc scores over the time frames using windowing based on attention peaks.
+        If 0, no windowing applied.
+    using_max_attn_shift: bool
+        Whether using the max_attn_shift constraint. (default: False)
+    max_attn_shift: int
+        Beam search will block the beams that attention shift more
+        than max_attn_shift.
+        Reference: https://arxiv.org/abs/1904.02619
+    minus_inf : float
+        DefaultL -1e20
+        The value of minus infinity to block some path
+        of the search.
+    """
+
+    def __init__(
+        self,
+        bos_index,
+        eos_index,
+        min_decode_ratio,
+        max_decode_ratio,
+        beam_size,
+        topk=1,
+        return_log_probs=False,
+        using_eos_threshold=True,
+        eos_threshold=1.5,
+        length_normalization=True,
+        length_rewarding=0,
+        coverage_penalty=0.0,
+        lm_weight=0.0,
+        lm_modules=None,
+        ctc_weight=0.0,
+        blank_index=0,
+        ctc_score_mode="full",
+        ctc_window_size=0,
+        using_max_attn_shift=False,
+        max_attn_shift=60,
+        minus_inf=-1e20,
+    ):
+        super(S2SBeamSearcher, self).__init__(
+            bos_index, eos_index, min_decode_ratio, max_decode_ratio,
+        )
+        self.beam_size = beam_size
+        self.topk = topk
+        self.return_log_probs = return_log_probs
+        self.length_normalization = length_normalization
+        self.length_rewarding = length_rewarding
+        self.coverage_penalty = coverage_penalty
+        self.coverage = None
+
+        if self.length_normalization and self.length_rewarding > 0:
+            raise ValueError(
+                "length normalization is not compatible with length rewarding."
+            )
+
+        self.using_eos_threshold = using_eos_threshold
+        self.eos_threshold = eos_threshold
+        self.using_max_attn_shift = using_max_attn_shift
+        self.max_attn_shift = max_attn_shift
+        self.lm_weight = lm_weight
+        self.lm_modules = lm_modules
+
+        # ctc related
+        self.ctc_weight = ctc_weight
+        self.blank_index = blank_index
+        self.att_weight = 1.0 - ctc_weight
+
+        assert (
+            0.0 <= self.ctc_weight <= 1.0
+        ), "ctc_weight should not > 1.0 and < 0.0"
+
+        if self.ctc_weight > 0.0:
+            if len({self.bos_index, self.eos_index, self.blank_index}) < 3:
+                raise ValueError(
+                    "To perform joint ATT/CTC decoding, set blank, eos and bos to different indexes."
+                )
+
+        # ctc already initialized
+        self.minus_inf = minus_inf
+        self.ctc_score_mode = ctc_score_mode
+        self.ctc_window_size = ctc_window_size
+
+
+    def forward(self, enc_states, src, audio_stats, wav_len):  # noqa: C901
+        """Applies beamsearch and returns the predicted tokens.
+        enc_states:     audio representation
+        src:            raw audio
+        audio_statss:   contains audio segmentation information
+        wav_len:        relative len of true audio len
+        """
+        batch_size = enc_states.shape[0]
+        device = enc_states.device
+        enc_lens = torch.round(enc_states.shape[1] * wav_len).int()
+
+        # Inflate the enc_states and enc_len by beam_size times
+        # Don't have to inflate enc_states/enc_len
+        # enc_states = inflate_tensor(enc_states, times=self.beam_size, dim=0)
+        # enc_lens = inflate_tensor(enc_lens, times=self.beam_size, dim=0)
+        src = inflate_tensor(src, times=self.beam_size, dim=0)
+
+        assert audio_stats.shape[0] == batch_size , f"decoding batch size must be 1"
+        audio_stats =  audio_stats[0] # batchsize is 1
+
+        # different beam may ends up with different lengths. Thus, use list intsead of tensor
+        # history stores the transcriptions of all past audio segments
+        history = [ list() for _ in range(self.beam_size)] 
+        
+        # The first index of each sentence.
+        self.beam_offset = (
+            torch.arange(batch_size, device=device) * self.beam_size
+        )
+
+        # initialize sequence scores variables.
+        # used across all segments
+        sequence_scores = torch.empty(
+            batch_size * self.beam_size, device=device
+        )
+        sequence_scores.fill_(float("-inf"))
+
+        # keep only the first to make sure no redundancy.
+        # used across all segments
+        sequence_scores.index_fill_(0, self.beam_offset, 0.0)
+
+        # keep the hypothesis that reaches eos of the last segment and their corresponding score and log_probs.
+        # used across all segments
+        hyps_and_scores = [[] for _ in range(batch_size)]
+
+        # keep the sequences that still not reaches eos of the LAST segment.
+        # if it reach eos but there's future segment left, still alive
+        alived_seq = torch.empty(
+            batch_size * self.beam_size, 0, device=device
+        ).long()
+
+        # Keep the log-probabilities of alived sequences.
+        # used across all segments
+        alived_log_probs = torch.empty(
+            batch_size * self.beam_size, 0, device=device
+        )
+
+        if self.ctc_weight > 0:
+            # (batch_size * beam_size, L, vocab_size)
+            
+            ctc_outputs = self.ctc_forward_step(enc_states)
+            # print( f"ctc_outputs : {ctc_outputs.shape} {enc_state.shape} {enc_lens}" )
+            ctc_scorer = CTCPrefixScorer(
+                ctc_outputs,
+                enc_lens,
+                batch_size,
+                self.beam_size,
+                self.blank_index,
+                self.eos_index,
+                self.ctc_window_size,
+            )
+            ctc_memory = None
+
+        num_seg = len(set(audio_stats))
+        # Loop through each audio segment
+        for seg_idx in range(num_seg):
+            start_seg = 0
+            if seg_idx > 0:
+                start_seg = audio_stats[seg_idx-1]
+            end_seg = audio_stats[seg_idx]
+            # enc_lens = torch.tensor( [ end_seg - start_seg ] ).int().to(src.device)
+            # now takes everything before into account
+            enc_lens = torch.tensor( [ end_seg ] ).int().to(src.device)
+            # enc_state is a segment of enc_states
+            # enc_state = enc_states[:, start_seg:end_seg]
+            # it contains all audio before since we need to use them to give scores
+            enc_state = enc_states[:, :end_seg]
+            
+            # memory is init inside segment loop since for every segment it will be refreshed!
+            memory = self.reset_mem(batch_size * self.beam_size, device=device)
+
+            if self.lm_weight > 0:
+                lm_memory = self.reset_lm_mem(batch_size * self.beam_size, device)
+
+            # if self.ctc_weight > 0:
+            #     # (batch_size * beam_size, L, vocab_size)
+                
+            #     ctc_outputs = self.ctc_forward_step(enc_state)
+            #     # print( f"ctc_outputs : {ctc_outputs.shape} {enc_state.shape} {enc_lens}" )
+            #     ctc_scorer = CTCPrefixScorer(
+            #         ctc_outputs,
+            #         enc_lens,
+            #         batch_size,
+            #         self.beam_size,
+            #         self.blank_index,
+            #         self.eos_index,
+            #         self.ctc_window_size,
+            #     )
+            #     ctc_memory = None
+
+            src_seg = src[:, start_seg:end_seg]
+            src_lens = enc_lens
+
+            # Using bos as the first input
+            inp_tokens = (
+                torch.zeros(batch_size * self.beam_size, device=device)
+                .fill_(self.bos_index)
+                .long()
+            )
+
+            min_decode_steps = int(enc_state.shape[1] * self.min_decode_ratio)
+            # max_decode_steps = int(enc_state.shape[1] * self.max_decode_ratio)
+            max_decode_steps = end_seg - start_seg
+            # Initialize the previous attention peak to zero
+            # This variable will be used when using_max_attn_shift=True
+            # NOT USED
+            prev_attn_peak = torch.zeros(batch_size * self.beam_size, device=device)
+
+            for t in range(max_decode_steps):
+                # print("decode step:", t, " in ", max_decode_steps)
+                # terminate condition
+                # if all beam has met eos of their LAST segment
+                if self._check_full_beams(hyps_and_scores, self.beam_size):
+                    break
+                # enc_lens is replaced by waves len, which is NOT USED
+                # encoded states is replaced by src since we have to do our autoregressive.
+                # prediction from scratch
+                log_probs, memory, attn = self.forward_step(
+                    inp_tokens, memory, src_seg , history, src_lens
+                )
+                log_probs = self.att_weight * log_probs
+
+                # Keep the original value
+                log_probs_clone = log_probs.clone().reshape(batch_size, -1)
+                vocab_size = log_probs.shape[-1]
+
+                # NOT USED
+                if self.using_max_attn_shift:
+                    # Block the candidates that exceed the max shift
+                    cond, attn_peak = self._check_attn_shift(attn, prev_attn_peak)
+                    log_probs = mask_by_condition(
+                        log_probs, cond, fill_value=self.minus_inf
+                    )
+                    prev_attn_peak = attn_peak
+
+                # Set eos to minus_inf when less than minimum steps.
+                if t < min_decode_steps:
+                    log_probs[:, self.eos_index] = self.minus_inf
+
+                # Set the eos prob to minus_inf when it doesn't exceed threshold.
+                # NOT USED both for test/valid search
+                if self.using_eos_threshold:
+                    cond = self._check_eos_threshold(log_probs)
+                    log_probs[:, self.eos_index] = mask_by_condition(
+                        log_probs[:, self.eos_index],
+                        cond,
+                        fill_value=self.minus_inf,
+                    )
+
+                # adding LM scores to log_prob if lm_weight > 0
+                if self.lm_weight > 0:
+                    lm_log_probs, lm_memory = self.lm_forward_step(
+                        inp_tokens, lm_memory
+                    )
+                    log_probs = log_probs + self.lm_weight * lm_log_probs
+
+                # adding CTC scores to log_prob if ctc_weight > 0
+                if self.ctc_weight > 0:
+                    # fix this later
+                    g = alived_seq
+
+                    # block blank token
+                    log_probs[:, self.blank_index] = self.minus_inf
+                    if self.ctc_weight != 1.0 and self.ctc_score_mode == "partial":
+                        # pruning vocab for ctc_scorer
+                        _, ctc_candidates = log_probs.topk(
+                            self.beam_size * 2, dim=-1
+                        )
+                    else:
+                        ctc_candidates = None
+                    # print("g shape: ", g.shape)
+                    # print("g[0]: ", g[0])
+                    ctc_log_probs, ctc_memory = ctc_scorer.forward_step(
+                        g, ctc_memory, ctc_candidates, attn
+                    )
+                    log_probs = log_probs + self.ctc_weight * ctc_log_probs
+
+                scores = sequence_scores.unsqueeze(1).expand(-1, vocab_size)
+                scores = scores + log_probs
+
+                # length normalization
+                if self.length_normalization:
+                    scores = scores / (t + 1)
+
+                # keep topk beams
+                # scores are topk largest value, candidates are the index respectively
+                scores, candidates = scores.view(batch_size, -1).topk(
+                    self.beam_size, dim=-1
+                )
+
+                # The input for the next step, also the output of current step.
+                inp_tokens = (candidates % vocab_size).view(
+                    batch_size * self.beam_size
+                )
+
+                scores = scores.view(batch_size * self.beam_size)
+                sequence_scores = scores
+
+                # recover the length normalization
+                if self.length_normalization:
+                    sequence_scores = sequence_scores * (t + 1)
+
+                # The index of which beam the current top-K output came from in (t-1) timesteps.
+                predecessors = (
+                    torch.div(candidates, vocab_size, rounding_mode="floor")
+                    + self.beam_offset.unsqueeze(1).expand_as(candidates)
+                ).view(batch_size * self.beam_size)
+
+                # Permute the memory to synchoronize with the output.
+                memory = self.permute_mem(memory, index=predecessors)
+                if self.lm_weight > 0:
+                    lm_memory = self.permute_lm_mem(lm_memory, index=predecessors)
+
+                if self.ctc_weight > 0:
+                    ctc_memory = ctc_scorer.permute_mem(ctc_memory, candidates)
+
+                # If using_max_attn_shift, then the previous attn peak has to be permuted too.
+                # Not used
+                if self.using_max_attn_shift:
+                    prev_attn_peak = torch.index_select(
+                        prev_attn_peak, dim=0, index=predecessors
+                    )
+
+                # Add coverage penalty
+                if self.coverage_penalty > 0:
+                    cur_attn = torch.index_select(attn, dim=0, index=predecessors)
+
+                    # coverage: cumulative attention probability vector
+                    if t == 0:
+                        # Init coverage
+                        self.coverage = cur_attn
+
+                    # the attn of transformer is [batch_size*beam_size, current_step, source_len]
+                    if len(cur_attn.size()) > 2:
+                        self.converage = torch.sum(cur_attn, dim=1)
+                    else:
+                        # Update coverage
+                        self.coverage = torch.index_select(
+                            self.coverage, dim=0, index=predecessors
+                        )
+                        self.coverage = self.coverage + cur_attn
+
+                    # Compute coverage penalty and add it to scores
+                    penalty = torch.max(
+                        self.coverage, self.coverage.clone().fill_(0.5)
+                    ).sum(-1)
+                    penalty = penalty - self.coverage.size(-1) * 0.5
+                    penalty = penalty.view(batch_size * self.beam_size)
+                    penalty = (
+                        penalty / (t + 1) if self.length_normalization else penalty
+                    )
+                    scores = scores - penalty * self.coverage_penalty
+
+                # Update alived_seq
+                alived_seq = torch.cat(
+                    [
+                        torch.index_select(alived_seq, dim=0, index=predecessors),
+                        inp_tokens.unsqueeze(1),
+                    ],
+                    dim=-1,
+                )
+
+                # Takes the log-probabilities
+                beam_log_probs = log_probs_clone[
+                    torch.arange(batch_size).unsqueeze(1), candidates
+                ].reshape(batch_size * self.beam_size)
+                alived_log_probs = torch.cat(
+                    [
+                        torch.index_select(
+                            alived_log_probs, dim=0, index=predecessors
+                        ),
+                        beam_log_probs.unsqueeze(1),
+                    ],
+                    dim=-1,
+                )
+                # is_eos means eos and at the last segment
+                # this function will update history if reach eos but not the last segment
+                # if eos and also last segment, hyp_scores will be updated
+                # assert False, f"{alived_log_probs.shape} {alived_seq.shape}\n{alived_seq}"
+                is_eos = self._update_hyp_and_scores_seg(
+                    num_seg-1 == seg_idx,
+                    history,
+                    inp_tokens,
+                    alived_seq,
+                    alived_log_probs,
+                    hyps_and_scores, # will be updated if eos and seg_idx is the last one
+                    scores,
+                    timesteps=t,
+                )
+                # if last segment and reach eos 
+                sequence_scores.masked_fill_(is_eos, float("-inf"))
+        # last segment is reached and not all of the beam are ended
+        if not self._check_full_beams(hyps_and_scores, self.beam_size):
+            # Using all eos to fill-up the hyps.
+            eos = (
+                torch.zeros(batch_size * self.beam_size, device=device)
+                .fill_(self.eos_index)
+                .long()
+            )
+            # Input is eos so that all search end
+            _ = self._update_hyp_and_scores(
+                eos, # input is forced to be eos. 
+                alived_seq,
+                alived_log_probs,
+                hyps_and_scores,
+                scores,
+                timesteps=max_decode_steps,
+            )
+
+        (
+            topk_hyps,
+            topk_scores,
+            topk_lengths,
+            log_probs,
+        ) = self._get_top_score_prediction(hyps_and_scores, topk=self.topk,)
+        # pick the best hyp
+        predictions = topk_hyps[:, 0, :]
+        predictions = batch_filter_seq2seq_output(
+            predictions, eos_id=self.eos_index
+        )
+
+        if self.return_log_probs:
+            return predictions, topk_scores, log_probs
+        else:
+            return predictions, topk_scores
+
+class InterleaveFormerSegmentedBeamSearch(CentralizedSegmentedBeamSearcher):
+    """This class implements the beam search decoding
+    for InterleaveFormer with segmentation.
+    See also S2SBaseSearcher(), S2SBeamSearcher().
+    Arguments
+    ---------
+    model : torch.nn.Module
+        The model to use for decoding.
+    linear : torch.nn.Module
+        A linear output layer.
+    **kwargs
+        Arguments to pass to S2SBeamSearcher
+    Example:
+    --------
+    >>> # see recipes/LibriSpeech/ASR_transformer/experiment.py
+    """
+
+    def __init__(
+        self, modules, temperature=1.0, temperature_lm=1.0, **kwargs,
+    ):
+        super(CentralizedSegmentedBeamSearcher, self).__init__(**kwargs)
+
+        self.model = modules[0]
+        self.fc = modules[1]
+        self.ctc_fc = modules[2]
+        self.softmax = torch.nn.LogSoftmax(dim=-1)
+
+        self.temperature = temperature
+        self.temperature_lm = temperature_lm
+
+    def reset_mem(self, batch_size, device):
+        """Needed to reset the memory during beamsearch."""
+        return None
+
+    def reset_lm_mem(self, batch_size, device):
+        """Needed to reset the LM memory during beamsearch."""
+        return None
+
+    def permute_mem(self, memory, index):
+        """Permutes the memory."""
+        memory = torch.index_select(memory, dim=0, index=index)
+        return memory
+
+    def permute_lm_mem(self, memory, index):
+        """Permutes the memory of the language model."""
+        memory = torch.index_select(memory, dim=0, index=index)
+        return memory
+
+    def forward_step(self, inp_tokens, memory, src, history, src_len):
+        """Performs a step in the implemented beamsearcher.
+        inp_tokens: output from last prediction will be part of the input. (eos will be ignored)
+        memory:     keep track of all text inputs for current segment
+        src:        current audio segment, unencoded
+        history:    past transcriptions associated with past audio segments
+        """
+        # inp_tokens may have eos from previous segment, 
+        # but will be masked by "padding" inside the decode()
+        memory = _update_mem_seg(inp_tokens, memory)
+        # wave_len is not needed. Instead, provide the memory len
+        pred, attn = self.model.decode_oracle(history, src, memory, enc_len = src_len)
         prob_dist = self.softmax(self.fc(pred) / self.temperature)
         return prob_dist[:, -1, :], memory, attn
 
