@@ -155,9 +155,9 @@ class ASR(sb.core.Brain):
                 
                 # be aware, it is src that is put into the search. 
                 # since InterleaveFormer now inefficiently recompute everything 
-                hyps, _ = self.hparams.valid_search(audio_representation.detach(), src.detach(), wav_lens)
+                hyps, _ = self.hparams.valid_search(audio_representation.detach(), src.detach(), audio_stats, wav_lens)
         elif stage == sb.Stage.TEST:
-            hyps, _ = self.hparams.test_search( audio_representation.detach(), src.detach(), wav_lens)
+            hyps, _ = self.hparams.test_search( audio_representation.detach(), src.detach(), audio_stats,  wav_lens)
         
         return p_ctc, p_seq, wav_lens, hyps, batch_token_seg_eos, torch.tensor( batch_tokens_eos_len).to(encoded_output.device)
 
