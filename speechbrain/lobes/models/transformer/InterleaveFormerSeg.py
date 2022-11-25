@@ -585,12 +585,9 @@ def get_lookahead_hopping_mask(padded_input, seg_stats):
             [0., 0., 0., 0.,   0.  ],]
             )
     """
-    # NOT implemented YET!
-    # pleaes follow get_lookahead_mask(padded_input) style
-    assert padded_input.shape[1] == seg_stats[1]
-    max_audio, max_text = seg_stats
+    max_audio, _ = seg_stats
     inf = float( 'inf')
-    total_len = sum(seg_stats)
+    total_len = padded_input.shape[1]
     tgt_mask = torch.tensor( - inf).repeat(total_len,total_len)
     tgt_mask = torch.triu(tgt_mask,1)
     tgt_mask[:max_audio,:max_audio] = 0
