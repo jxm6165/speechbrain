@@ -272,7 +272,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
         return padding_mask, final_mask
 
     @torch.no_grad()
-    def decode_oracle(self, history, src, memory, enc_len=None):
+    def decode_oracle(self, history, src, memory, src_pad=None):
         """This method implements a decoding step for the InterleaveFormerSeg model.
         The segmentation is given by pre-processing, known as oracle.
         Arguments
@@ -283,84 +283,90 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             Raw audio instead of encoded audio.
         memory: torch.Tensor
             keep track of all text inputs for current segment
-        memory_len : torch.LongTensor
-            The actual length of the memory
+        src_pad : torch.LongTensor
+            padding for the src
         """
 
-        # assert False, f"Even with oracle audio split, need to updates audio stats/text state every time"
-        if src.ndim == 4:
-            bz, t, ch1, ch2 = src.shape
-            src = src.reshape(bz, t, ch1 * ch2)
-        
-        _, max_audio, _ = src.shape
-        beam_width, max_text, = memory.shape # bin_width x 1 becaues each time 1 token but consider bin_width # of possibility in beam search
-
-        # pad history
         history_len = [ len(h) for h in history]
-        max_hist_len = max(history_len)
-        history_pad_mask = []
-        histories = []
-        for h_idx, h in enumerate(history):
-            histories.append( torch.tensor(h).to(src.device) )
-            h_mask = np.array( [False]* history_len[h_idx] + [True] * (max_hist_len - history_len[h_idx]))
-            history_pad_mask.append( h_mask  )
+        assert len(history_len) == len(src)
 
-        history_pad_mask = np.array(history_pad_mask)
-        history_pad_mask = torch.tensor(history_pad_mask).to(src.device).view(beam_width, -1)
-        histories = pad_sequence( histories , batch_first=True ).to(src.device)
-
-        src = self.custom_src_module(src)
-
-        # add pos encoding to queries if are sinusoidal ones else
-        if self.attention_type == "RelPosMHAXL":
-            pos_embs_encoder = self.positional_encoding(src)
-        elif self.positional_encoding_type == "fixed_abs_sine":
-            src = src + self.positional_encoding(src)  # add the encodings here
-            pos_embs_encoder = None
-        # jointly emb memory and history as tgt
-        tgt = torch.cat([histories, memory], dim = 1)
-        tgt = self.custom_tgt_module(tgt)
-        if self.attention_type == "RelPosMHAXL":
-            # we use fixed positional encodings in the decoder
-            assert False, f"Not supported yet"
-        elif self.positional_encoding_type == "fixed_abs_sine":
-            tgt = tgt + self.positional_encoding(tgt)  # add the encodings here
-            pos_embs_target = None
-            pos_embs_encoder = None
-        # split them back to histories and memory
-        histories = tgt[:, :max_hist_len]
-        tgt = tgt[:, max_hist_len: ]
+        # history emb + src + memory emb
+        final_src = []
+        modalities = []
+        seg_point = []
+        pred_range = []
+        pred_lens = []
+        for idx, h in enumerate(history):
+            # past transcription embedding
+            hist = torch.tensor(np.array(h)).to(src[0].device).unsqueeze(0)
+            history_emb = self.custom_tgt_module( hist )
+            # print( f"history_emb: {history_emb.shape} {self.positional_encoding(history_emb).shape}" )
+            if len(h) > 0:
+                # print("Check h len:", len(h), h[-10:])
+                if len(h) > 2499:
+                    # if history is super long that is exceeding max pos emb
+                    history_emb = history_emb[:,-2499:, :]
+                history_emb = history_emb + self.positional_encoding(history_emb)
+            history_emb = history_emb.squeeze(0)
+            # present audio embedding
+            audio_seg = src[idx].unsqueeze(0) 
+            if audio_seg.ndim == 4:
+                b , t, ch1, ch2 = audio_seg.shape
+                audio_seg = audio_seg.reshape(b , t, ch1 * ch2)
+            audio_seg_emb = self.custom_src_module( audio_seg )
+            audio_seg_emb = ( audio_seg_emb + self.positional_encoding(audio_seg_emb) ).squeeze(0)
+            # present on-going transcription embedding
+            # print("memory:", mem, "idx:", idx)
+            mem = torch.tensor( np.array(memory[idx]) ).to(audio_seg_emb.device).unsqueeze(0)
+            memory_emb = self.custom_tgt_module( mem )
+            memory_emb = memory_emb + self.positional_encoding(memory_emb)
+            memory_emb = memory_emb.squeeze(0)
+            # final interleaved sample and its modalities
+            hist_audio_mem = torch.cat( [ history_emb, audio_seg_emb, memory_emb ], dim = 0)
+            mod = np.array( [1] * len(history_emb) + [2] * len(audio_seg_emb) + [1] * len(memory_emb) )
+            # print("Check modality per beam:", len(history_emb), len(audio_seg_emb), len(memory_emb))
+            final_src.append(hist_audio_mem )
+            modalities.append( torch.tensor( mod ))
+            present_start = len(history_emb) + len(audio_seg_emb)
+            seg_point.append( present_start )
+            present_end = present_start + len(memory_emb)
+            pred_range.append(( present_start, present_end ))
+            pred_lens.append(present_end - present_start)
+        final_src = pad_sequence(final_src, batch_first=True).to(src[0].device)
+        modalities = pad_sequence(modalities, batch_first=True).to(src[0].device)
+        final_pad = (modalities == 0).to(final_src.device)
         
-        # final padding mask
-        # in the case of batch_size = 1, within each segment, there shouldn't be any padding
-        src_padding_mask = torch.zeros( src.shape[:2] ).bool().to(src.device)
-        # assert False, f"Check tgt has eos from previous seg or not\n: {( tgt == 2)}"
-        # tgt is memory. In fact, no need to padding since they syncronously grow
-        # however, eos may exist and thus need to be ignored, thus use "padding" here
-        tgt_padding_mask = ( memory == 2).to(src.device) # 2 is the bos index
-        final_padding_mask = torch.cat([history_pad_mask, src_padding_mask,tgt_padding_mask ], dim = 1).to(src.device).bool()
-
-        # final src and its causal mask, simple hopping style
-        final_src = torch.cat([histories, src, tgt], dim = 1).to(src.device)
-        seg_stats = [histories.shape[1] + src.shape[1], -1] # 2nd element is not used
-        # the mask shared across all attn head and across the batch_dim (i.e. beam_side heres)
-        causal_mask = get_lookahead_hopping_mask(final_src, seg_stats).float()
-
-        modalities = 2 * torch.ones(final_src.shape[:2]).to(final_src.device)
-        # current audio is set to 1, others are 2 indicating text modality
-        modalities[:, histories.shape[1]: seg_stats[0] ] = 1
+        # make a normal causal mask first
+        causal_mask = []
+        inf = float( 'inf')
+        max_len = final_src.shape[1]
+        normal_causal_mask = torch.tensor( - inf).repeat(max_len, max_len)
+        normal_causal_mask = torch.triu(normal_causal_mask,1)
+        for seg in seg_point:
+            _mask = normal_causal_mask.clone()
+            # do unmask operation for each audio segment and previous transcriptions
+            hopping_causal_mask = unmask( _mask, 0, seg) 
+            causal_mask.append( torch.unsqueeze( hopping_causal_mask.clone(), 0) )
+        final_causal_mask = torch.cat( causal_mask ).repeat_interleave(repeats = self.nhead, dim = 0).to(final_src.device)
 
         # encoded_output is bi-modality learned representation.
         encoded_output, attn = self.encoder(
             src= final_src,
             modalities = modalities, # used by modality expert
-            src_mask= causal_mask, # this must be a causal mask, hopping style
-            src_key_padding_mask= final_padding_mask,
-            pos_embs=pos_embs_encoder,
+            src_mask= final_causal_mask, # this must be a causal mask, hopping style
+            src_key_padding_mask= final_pad,
+            pos_embs= None,
         )
 
-        prediction = encoded_output[:, seg_stats[0]: ]
-        return prediction, attn[-1]
+        prediction = []
+        max_pred_len = max(pred_lens)
+
+        for i, (s,e) in enumerate( pred_range ):
+            # e-1 to retrieve the latest token (the last one)
+            pred = encoded_output[i, e-1 ].unsqueeze(0)
+            # print("PRED:", pred.shape)
+            prediction.append(pred)
+        return torch.cat( prediction, dim = 0),  attn[-1]
 
     def _init_params(self):
         for p in self.parameters():
