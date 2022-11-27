@@ -193,8 +193,8 @@ class ASR(sb.core.Brain):
                 token_seg_bos.append(BOS)
                 token_seg_bos.append(text_seg)
                 # for token_eos
-                token_seg_eos.append(EOS)
                 token_seg_eos.append(text_seg)
+                token_seg_eos.append(EOS)
                 # len calculation for compute objective
                 text_len = len(text_seg)
                 tokens_eos_len += (text_len + 1)
