@@ -1,4 +1,4 @@
-"Decoding methods for seq2seq autoregressive model.
+"""Decoding methods for seq2seq autoregressive model.
 
 Authors
  * Ju-Chieh Chou 2020
