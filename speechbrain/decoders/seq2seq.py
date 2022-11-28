@@ -514,6 +514,7 @@ class S2SBeamSearcher(S2SBaseSearcher):
     def _update_hyp_and_scores_seg(
         self,
         seg_progress,
+        memory,
         num_seg,
         history,
         inp_tokens,
@@ -529,6 +530,10 @@ class S2SBeamSearcher(S2SBaseSearcher):
         ---------
         seg_progress: list
             kept the current progress of each beam
+        seg_len: list
+            kept the segment len, used to restrict decoding
+        memory: list
+            memory of a beam. If exeeced seg len, cleared and become [bos]
         num_seg:
             kept the total number of segment
         history: list of list
@@ -558,10 +563,12 @@ class S2SBeamSearcher(S2SBaseSearcher):
         # truly eos means all segments are consumed and we met eos
         true_eos = torch.logical_and(is_eos, torch.tensor( np.array( seg_progress ) >= num_seg - 1 ).to(is_eos.device) )
         # Store the hypothesis and their scores when reaching eos.
-        if eos_indices.shape[0] > 0:
-            for index in eos_indices:
-                # convert to int
-                index = index.item()
+
+        # loop through each beam
+        for index in range(len(memory)):
+            # assert False,f"eos_indices: {eos_indices.cpu().numpy()}"
+            eos_indices_numpy = eos_indices.cpu().numpy()
+            if index in eos_indices_numpy:
                 batch_id = torch.div(
                     index, self.beam_size, rounding_mode="floor"
                 )
@@ -595,8 +602,25 @@ class S2SBeamSearcher(S2SBaseSearcher):
                     # print("Check current history:", history)
                     history[index] += list( hist )
                     seg_progress[index] += 1
-        # print("Check current history:", history)
-        return true_eos
+            
+            else: 
+                # Also update seg_progress if an audio seg is consumed 
+                # restrict each audio seg to 10 word token
+                if len(memory[index]) > 10:
+                    inp_tokens[index] = self.eos_index
+                    # let update_mem_seg() later to reset memory to [bos] using inp_tok == eos
+                    if seg_progress[index] + 1 < num_seg:
+                        seg_progress[index] += 1
+                    else:
+                        true_eos[index] = True
+                        inp_tokens[index] = 2
+                    hyp = alived_seq[index, :]
+                    hist =  hyp.cpu().numpy()
+                    if self.eos_index in hist:
+                        hist = hist[hist != self.eos_index]
+                    history[index] += list( hist )
+
+        return true_eos, inp_tokens
 
     def _get_top_score_prediction(self, hyps_and_scores, topk):
         """This method sorts the scores and return corresponding hypothesis and log probs.
@@ -2039,14 +2063,14 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
         # uniform audio segmentation during inference
         assert audio_stats.shape[0] == batch_size , f"decoding batch size must be 1"
         audio_stats =  audio_stats[0] # batchsize is 1
-        max_l = max(audio_stats)
-        if len(set(audio_stats)) == 3 or len(set(audio_stats)) == 2:
-            # uniformly segment the audio during inference into 2 segment if originally it has 2-3
-            audio_stats = np.array([ max_l//2, max_l ])
-        elif len(set(audio_stats)) > 3:
-            # no matter how many segs, make them to 3 uniformly!
-            delta_3 = max_l//3
-            audio_stats = np.array([ delta_3, delta_3*2, delta_3*3, max_l ])
+        # max_l = max(audio_stats)
+        # if len(set(audio_stats)) == 3 or len(set(audio_stats)) == 2:
+        #     # uniformly segment the audio during inference into 2 segment if originally it has 2-3
+        #     audio_stats = np.array([ max_l//2, max_l ])
+        # elif len(set(audio_stats)) > 3:
+        #     # no matter how many segs, make them to 3 uniformly!
+        #     delta_3 = max_l//3
+        #     audio_stats = np.array([ delta_3, delta_3*2, delta_3*3, max_l ])
 
         # different beam may ends up with different lengths. Thus, use list instead of tensor
         # history stores the transcriptions of all past audio segments
@@ -2314,8 +2338,9 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
             # this function will update history if reach eos but not the last segment
             # if eos and also last segment, hyp_scores will be updated
             # assert False, f"{alived_log_probs.shape} {alived_seq.shape}\n{alived_seq}"
-            is_eos = self._update_hyp_and_scores_seg(
+            is_eos,inp_tokens = self._update_hyp_and_scores_seg(
                 seg_progress,
+                memory,
                 num_seg,
                 history,
                 inp_tokens,
