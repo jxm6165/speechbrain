@@ -32,7 +32,7 @@ from hyperpyyaml import load_hyperpyyaml
 from speechbrain.utils.distributed import run_on_main
 from speechbrain.pretrained import EncoderDecoderASR
 from speechbrain.alignment.ctc_segmentation import CTCSegmentation
-
+import gc
 logger = logging.getLogger(__name__)
 
 # Define training procedure
@@ -99,6 +99,7 @@ class ASR(sb.core.Brain):
         else:
             # read batch stats from pkl
             if stage == sb.Stage.TRAIN:
+                # print(self.train_batch_stats.keys())
                 stats_dict = self.train_batch_stats[str(batch.id)]
             elif stage == sb.Stage.VALID:
                 stats_dict = self.valid_batch_stats[str(batch.id)]
@@ -314,6 +315,10 @@ class ASR(sb.core.Brain):
 
                 # anneal lr every update
                 self.hparams.noam_annealing(self.optimizer)
+        del batch
+        del outputs
+        gc.collect()
+        torch.cuda.empty_cache()
 
         return loss.detach().cpu()
 
@@ -322,6 +327,10 @@ class ASR(sb.core.Brain):
         with torch.no_grad():
             predictions = self.compute_forward(batch, stage=stage)
             loss = self.compute_objectives(predictions, batch, stage=stage)
+        del batch
+        del predictions
+        gc.collect()
+        torch.cuda.empty_cache()
         return loss.detach()
 
     def on_stage_start(self, stage, epoch):
@@ -717,3 +726,4 @@ if __name__ == "__main__":
             max_key="ACC",
             test_loader_kwargs=hparams["test_dataloader_opts"],
         )
+
