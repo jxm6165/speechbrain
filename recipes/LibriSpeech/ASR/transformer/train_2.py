@@ -514,12 +514,22 @@ def dataio_prepare(hparams, have_pkl=True):
             segs = aligner(wav, text)
 
             intervals = segs.segments
-            seg_points_in_time = list(list(zip(*intervals))[1])
+            time_end_array = list(list(zip(*intervals))[1])
+            rounded_end = np.floor(max(time_end_array))
+            max_end = int(rounded_end) if rounded_end % 2 == 0 else int(rounded_end) - 1
+            interval_range = list(range(2, max_end+1, 2))
+            seg_index = [np.searchsorted(time_end_array, interval, side='right') - 1 for interval in interval_range]
+            seg_points_in_time = time_end_array[seg_index]
             audio_seg_points = [round(seg_point*16000)+1 for seg_point in seg_points_in_time]
-            return audio_seg_points
+            seg_pts = [index + 1 for index in seg_index]
+            seg_pts.insert(0, 0)
+            seg_pts.append(len(text))
+            binned_wrds = [text[seg_pts[i]:seg_pts[i+1]] for i in range(len(seg_pts)-1)]
+            return audio_seg_points, binned_wrds
 
         def get_token_seg(wrds):
             token_seg = [tokenizer.encode_as_ids(wrd) for wrd in wrds]
+            token_seg = [functools.reduce(operator.iconcat, t, []) for t in token_seg]
             return [len(functools.reduce(operator.iconcat, token_seg[:i+1], [])) for i in range(len(token_seg))]
 
 
@@ -527,9 +537,9 @@ def dataio_prepare(hparams, have_pkl=True):
         @sb.utils.data_pipeline.provides("audio_seg_points", "token_seg_points")
 
         def generate_segments(wav, wrd):
-            audio_seg_points = get_audio_seg(wav, wrd)
+            audio_seg_points, binned_wrds = get_audio_seg(wav, wrd)
             yield audio_seg_points
-            token_seg_points = get_token_seg(wrd.split(' '))
+            token_seg_points = get_token_seg(binned_wrds)
             yield token_seg_points
 
         if have_pkl[0] == 0:
