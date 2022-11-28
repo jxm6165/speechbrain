@@ -528,7 +528,7 @@ def dataio_prepare(hparams, have_pkl=True):
             return audio_seg_points, binned_wrds
 
         def get_token_seg(wrds):
-            token_seg = [tokenizer.encode_as_ids(wrd) for wrd in wrds]
+            token_seg = [[tokenizer.encode_as_ids(wrd) for wrd in bin] for bin in wrds]
             token_seg = [functools.reduce(operator.iconcat, t, []) for t in token_seg]
             return [len(functools.reduce(operator.iconcat, token_seg[:i+1], [])) for i in range(len(token_seg))]
 
