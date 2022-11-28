@@ -303,9 +303,9 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             # print( f"history_emb: {history_emb.shape} {self.positional_encoding(history_emb).shape}" )
             if len(h) > 0:
                 # print("Check h len:", len(h), h[-10:])
-                if len(h) > 2499:
+                if len(h) > 1000:
                     # if history is super long that is exceeding max pos emb
-                    history_emb = history_emb[:,-2499:, :]
+                    history_emb = history_emb[:,-500:, :]
                 history_emb = history_emb + self.positional_encoding(history_emb)
             history_emb = history_emb.squeeze(0)
             # present audio embedding
@@ -317,7 +317,10 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             audio_seg_emb = ( audio_seg_emb + self.positional_encoding(audio_seg_emb) ).squeeze(0)
             # present on-going transcription embedding
             # print("memory:", mem, "idx:", idx)
-            mem = torch.tensor( np.array(memory[idx]) ).to(audio_seg_emb.device).unsqueeze(0)
+            m_raw = memory[idx]
+            # if len(m_raw) > 1500:
+            #     print(m_raw)
+            mem = torch.tensor( np.array(m_raw) ).to(audio_seg_emb.device).unsqueeze(0)
             memory_emb = self.custom_tgt_module( mem )
             memory_emb = memory_emb + self.positional_encoding(memory_emb)
             memory_emb = memory_emb.squeeze(0)
