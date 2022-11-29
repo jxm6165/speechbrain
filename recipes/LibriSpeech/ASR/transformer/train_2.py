@@ -509,29 +509,36 @@ def dataio_prepare(hparams, have_pkl=True):
         aligner = CTCSegmentation(asr_model, kaldi_style_text=False)
 
         def get_audio_seg(wav, wrd):
+            # Get aligned timestamps by CTC aligner
             text = [" "+ sing_wrd + " " for sing_wrd in wrd.split(" ")]
-
             segs = aligner(wav, text)
-
             intervals = segs.segments
             time_end_array = np.array(list(list(zip(*intervals))[1]))
+            
+            # deal with audio length < 2 sec, only one segment
             if max(time_end_array) <= 2:
                 return [round(max(time_end_array)*16000)+1], [text]
+            
             rounded_end = np.floor(max(time_end_array))
             max_end = int(rounded_end) + 1 if rounded_end % 2 == 0 else int(rounded_end)
             interval_range = list(range(2, max_end, 2))
             seg_index = [np.searchsorted(time_end_array, interval, side='right') - 1 for interval in interval_range]
+            
+            # if the last bin only has one word, we want to merge it to the previous one
+            if seg_index[-1] == len(time_end_array) - 2:
+                seg_index[-1] = len(time_end_array) - 1
+            else:
+                seg_index.append(len(time_end_array) - 1)
+            
             seg_points_in_time = time_end_array[seg_index]
             audio_seg_points = [round(seg_point*16000)+1 for seg_point in seg_points_in_time]
             seg_pts = [index + 1 for index in seg_index]
             seg_pts.insert(0, 0)
-            seg_pts.append(len(text))
             binned_wrds = [text[seg_pts[i]:seg_pts[i+1]] for i in range(len(seg_pts)-1)]
             return audio_seg_points, binned_wrds
 
         def get_token_seg(wrds):
-            token_seg = [[tokenizer.encode_as_ids(wrd) for wrd in bin] for bin in wrds]
-            token_seg = [functools.reduce(operator.iconcat, t, []) for t in token_seg]
+            token_seg = [tokenizer.encode_as_ids(' '.join(bin_wrd)) for bin_wrd in wrds]
             return [len(functools.reduce(operator.iconcat, token_seg[:i+1], [])) for i in range(len(token_seg))]
 
 
@@ -679,8 +686,6 @@ if __name__ == "__main__":
         train_bsampler,
         valid_bsampler,
     ) = dataio_prepare(hparams, have_pkl=have_pkl)
-    
-    print(train_data[10])
 
     # We download the pretrained LM from HuggingFace (or elsewhere depending on
     # the path given in the YAML file). The tokenizer is loaded at the same time.
@@ -710,6 +715,7 @@ if __name__ == "__main__":
     if valid_bsampler is not None:
         valid_dataloader_opts = {"batch_sampler": valid_bsampler}
 
+    
     # Training
     asr_brain.fit(
         asr_brain.hparams.epoch_counter,
@@ -731,3 +737,4 @@ if __name__ == "__main__":
             max_key="ACC",
             test_loader_kwargs=hparams["test_dataloader_opts"],
         )
+    
