@@ -514,10 +514,12 @@ def dataio_prepare(hparams, have_pkl=True):
             segs = aligner(wav, text)
 
             intervals = segs.segments
-            time_end_array = list(list(zip(*intervals))[1])
+            time_end_array = np.array(list(list(zip(*intervals))[1]))
+            if max(time_end_array) <= 2:
+                return [round(max(time_end_array)*16000)+1], [text]
             rounded_end = np.floor(max(time_end_array))
-            max_end = int(rounded_end) if rounded_end % 2 == 0 else int(rounded_end) - 1
-            interval_range = list(range(2, max_end+1, 2))
+            max_end = int(rounded_end) + 1 if rounded_end % 2 == 0 else int(rounded_end)
+            interval_range = list(range(2, max_end, 2))
             seg_index = [np.searchsorted(time_end_array, interval, side='right') - 1 for interval in interval_range]
             seg_points_in_time = time_end_array[seg_index]
             audio_seg_points = [round(seg_point*16000)+1 for seg_point in seg_points_in_time]
@@ -677,6 +679,8 @@ if __name__ == "__main__":
         train_bsampler,
         valid_bsampler,
     ) = dataio_prepare(hparams, have_pkl=have_pkl)
+    
+    print(train_data[10])
 
     # We download the pretrained LM from HuggingFace (or elsewhere depending on
     # the path given in the YAML file). The tokenizer is loaded at the same time.
