@@ -12,6 +12,7 @@ from torch.nn.utils.rnn import pad_sequence
 import speechbrain as sb
 from speechbrain.decoders.ctc import CTCPrefixScorer
 import gc
+import copy
 
 class S2SBaseSearcher(torch.nn.Module):
     """S2SBaseSearcher class to be inherited by other
@@ -558,6 +559,7 @@ class S2SBeamSearcher(S2SBaseSearcher):
         is_eos : torch.BoolTensor
             Each element represents whether the token is eos.
         """
+        new_history = copy.deepcopy(history)
         is_eos = inp_tokens.eq(self.eos_index)
         (eos_indices,) = torch.nonzero(is_eos, as_tuple=True)
         # truly eos means all segments are consumed and we met eos
@@ -566,7 +568,6 @@ class S2SBeamSearcher(S2SBaseSearcher):
 
         # loop through each beam
         for index in range(len(memory)):
-            # assert False,f"eos_indices: {eos_indices.cpu().numpy()}"
             eos_indices_numpy = eos_indices.cpu().numpy()
             if index in eos_indices_numpy:
                 batch_id = torch.div(
@@ -586,10 +587,6 @@ class S2SBeamSearcher(S2SBaseSearcher):
                     hist =  pre.cpu().numpy()
                     eos_mask = hist != self.eos_index
                     hist = torch.tensor( hist[eos_mask] ).to(hyp.device)
-                    # print( f"Real EOS\nhyp: {hyp.cpu().numpy()}\nhist: {hist}\nlast: {last}")
-                    # print(f"Individual:{seg_progress[index] + 1}/{num_seg}\nTotal Progres: {np.array(seg_progress)/num_seg}")
-                    # print()
-                    # print("hist", hist.shape, 'last', last.shape)
                     hyp = torch.cat( [ hist, last ] )
                     hyps_and_scores[batch_id].append((hyp, log_probs, final_scores))
                 else:
@@ -598,9 +595,7 @@ class S2SBeamSearcher(S2SBaseSearcher):
                     hist =  hyp.cpu().numpy()
                     if self.eos_index in hist:
                         hist = hist[hist != self.eos_index]
-                    # print("Check hist:", hist)
-                    # print("Check current history:", history)
-                    history[index] += list( hist )
+                    new_history[index] += list( hist )
                     seg_progress[index] += 1
             
             else: 
@@ -612,15 +607,14 @@ class S2SBeamSearcher(S2SBaseSearcher):
                     if seg_progress[index] + 1 < num_seg:
                         seg_progress[index] += 1
                     else:
-                        true_eos[index] = True
                         inp_tokens[index] = 2
                     hyp = alived_seq[index, :]
                     hist =  hyp.cpu().numpy()
                     if self.eos_index in hist:
                         hist = hist[hist != self.eos_index]
-                    history[index] += list( hist )
+                    new_history[index] += list( hist )
 
-        return true_eos, inp_tokens
+        return true_eos, inp_tokens, new_history
 
     def _get_top_score_prediction(self, hyps_and_scores, topk):
         """This method sorts the scores and return corresponding hypothesis and log probs.
@@ -1357,32 +1351,32 @@ def _update_mem(inp_tokens, memory):
         return inp_tokens.unsqueeze(1)
     return torch.cat([memory, inp_tokens.unsqueeze(1)], dim=-1)
 
-def _update_mem_seg(inp_tokens, memory):
-    """This function is for updating the memory for transformer searches.
-    it is called at each decoding step. When being called, it appends the
-    predicted token of the previous step to existing memory 
+# def _update_mem_seg(inp_tokens, memory):
+#     """This function is for updating the memory for transformer searches.
+#     it is called at each decoding step. When being called, it appends the
+#     predicted token of the previous step to existing memory 
     
-    If eos is appear, the previous memory will be cleared and set to bos
+#     If eos is appear, the previous memory will be cleared and set to bos
 
-    Besides, manually set first column as bos if needed
+#     Besides, manually set first column as bos if needed
 
-    Arguments:
-    -----------
-    inp_tokens : tensor
-        Predicted token of the previous decoding step.
-    memory : tensor
-        Contains all the predicted tokens.
-    """
-    # print("Memory:", memory, '\ninputs:', inp_tokens)
-    inp_tokens = inp_tokens.cpu().numpy()
-    for idx, inp_token in enumerate( inp_tokens ):
-        # print("inp_token", type(inp_token), inp_token, )
-        if inp_token == 2:
-            memory[idx] = [1]
-        else:
-            memory[idx] += [ inp_token ]
-    # print("RETURN:", memory)
-    return memory
+#     Arguments:
+#     -----------
+#     inp_tokens : tensor
+#         Predicted token of the previous decoding step.
+#     memory : tensor
+#         Contains all the predicted tokens.
+#     """
+#     # print("Memory:", memory, '\ninputs:', inp_tokens)
+#     inp_tokens = inp_tokens.cpu().numpy()
+#     for idx, inp_token in enumerate( inp_tokens ):
+#         # print("inp_token", type(inp_token), inp_token, )
+#         if inp_token == 2:
+#             memory[idx] = [1]
+#         else:
+#             memory[idx] += [ inp_token ]
+#     # print("RETURN:", memory)
+#     return memory
 
 class S2STransformerBeamSearch(S2SBeamSearcher):
     """This class implements the beam search decoding
@@ -2056,6 +2050,7 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
         audio_statss:   contains audio segmentation information
         wav_len:        relative len of true audio len
         """
+        self.refresher = refresh_and_remove()
         batch_size = enc_states.shape[0]
         device = enc_states.device
         enc_lens = torch.round(enc_states.shape[1] * wav_len).int()
@@ -2140,9 +2135,8 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
         # memory kept the predicted text tokens for a beam of a segment. Will be refreshed to bos
         # if an segment has met eos.
         memory = [ [] for _ in range(self.beam_size)]
-
         if self.lm_weight > 0:
-            lm_memory = self.reset_lm_mem(batch_size * self.beam_size, device)
+            lm_memory = [ [] for _ in range(self.beam_size)] #self.reset_lm_mem(batch_size * self.beam_size, device)
 
         # Using bos as the first input
         inp_tokens = (
@@ -2160,6 +2154,9 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
 
         for t in range(max_decode_steps):
             # print("decode step:", t, " in ", max_decode_steps)
+            # print("Check seg progress:", np.array(seg_progress)/num_seg )
+            # print(memory)
+            # print()
             # terminate condition
             # if all beam has met eos of their LAST segment
             if self._check_full_beams(hyps_and_scores, self.beam_size):
@@ -2209,7 +2206,7 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
             # adding LM scores to log_prob if lm_weight > 0
             if self.lm_weight > 0:
                 lm_log_probs, lm_memory = self.lm_forward_step(
-                    inp_tokens, lm_memory
+                    inp_tokens, lm_memory, history
                 )
                 log_probs = log_probs + self.lm_weight * lm_log_probs
 
@@ -2338,7 +2335,7 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
             # this function will update history if reach eos but not the last segment
             # if eos and also last segment, hyp_scores will be updated
             # assert False, f"{alived_log_probs.shape} {alived_seq.shape}\n{alived_seq}"
-            is_eos,inp_tokens = self._update_hyp_and_scores_seg(
+            is_eos,inp_tokens,history = self._update_hyp_and_scores_seg(
                 seg_progress,
                 memory,
                 num_seg,
@@ -2387,6 +2384,55 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
         else:
             return predictions, topk_scores
 
+class refresh_and_remove():
+    def __init__(self, beam_size = 10, capacity1 = 3, capacity2 = 4):
+        self.beam_size = beam_size
+        # used by tri-gram removing
+        self.capacity1 = capacity1
+        self.pool1 = {key:[] for key in range(self.beam_size)}
+        # used by 4-gram removing
+        self.capacity2 = capacity2
+        self.pool2 = {key:[] for key in range(self.beam_size)}
+      
+    def check_and_replace(self, tokens, memory):
+        # add each token to the memory
+        # print("Overall tokens", tokens)
+        new_memory = [ [] for _ in range(len(tokens))]
+        for i,tok in enumerate(tokens):
+            # print("tok", tok, ' at beam', i)
+            if tok == 2:
+                new_memory[i] = [1]
+                # print("eos memory",new_memory[i])
+                continue
+            new_memory[i] = memory[i] + [ tok ]
+            # check repetition of tri-gram
+            if len(memory[i]) > 3:
+                if memory[i][-3:] in self.pool1[i]:
+                    new_memory[i] = memory[i][:-3]
+                    # clear pool
+                    self.pool2 = {key:[] for key in range(self.beam_size)}
+                    self.pool1 = {key:[] for key in range(self.beam_size)}
+                    continue
+                else:
+                    if len( self.pool1[i] ) >= self.capacity1:
+                        self.pool1[i].pop(0)
+                    self.pool1[i].append(memory[i][-3:])
+            # check repetition of 4-gram
+            if len(memory[i]) > 4:
+                if memory[i][-4:] in self.pool2[i]:
+                    new_memory[i] = memory[i][:-4]
+                    # clear pool1
+                    self.pool1 = {key:[] for key in range(self.beam_size)}
+                    self.pool2 = {key:[] for key in range(self.beam_size)}
+                else:
+                    if len( self.pool2[i] ) >= self.capacity2:
+                        self.pool2[i].pop(0)
+                    self.pool2[i].append(memory[i][-4:])
+            # ensure first 1 is bos
+            if new_memory[i][0] != 1:
+                new_memory[i] = [1] +new_memory[i]
+        return new_memory
+
 class InterleaveFormerSegmentedBeamSearch(CentralizedSegmentedBeamSearcher):
     """This class implements the beam search decoding
     for InterleaveFormer with segmentation.
@@ -2416,6 +2462,7 @@ class InterleaveFormerSegmentedBeamSearch(CentralizedSegmentedBeamSearcher):
 
         self.temperature = temperature
         self.temperature_lm = temperature_lm
+        self.refresher = None
 
     def reset_mem(self, batch_size, device):
         """Needed to reset the memory during beamsearch."""
@@ -2441,7 +2488,34 @@ class InterleaveFormerSegmentedBeamSearch(CentralizedSegmentedBeamSearcher):
 
     def permute_lm_mem(self, memory, index):
         """Permutes the memory of the language model."""
-        memory = torch.index_select(memory, dim=0, index=index)
+        # memory = torch.index_select(memory, dim=0, index=index)
+        # return memory
+        index = index.cpu().numpy()
+        # print("index of permute:", index)
+        new_memory = [ list() for _ in range(len(memory))]
+        for i, idx in enumerate(index) :
+            new_memory[i] = memory[ idx ]
+        return new_memory
+    
+    def _update_mem_seg(self, inp_tokens, memory):
+        """This function is for updating the memory for transformer searches.
+        it is called at each decoding step. When being called, it appends the
+        predicted token of the previous step to existing memory 
+        
+        If eos is appear, the previous memory will be cleared and set to bos
+
+        Besides, manually set first column as bos if needed
+
+        Arguments:
+        -----------
+        inp_tokens : tensor
+            Predicted token of the previous decoding step.
+        memory : tensor
+            Contains all the predicted tokens.
+        """
+        inp_tokens = inp_tokens.cpu().numpy()
+        # remove repeated tokens and add new inp_tokens
+        memory = self.refresher.check_and_replace(inp_tokens, memory)
         return memory
 
     def forward_step(self, inp_tokens, memory, src, history, src_seg_pad = None):
@@ -2452,24 +2526,27 @@ class InterleaveFormerSegmentedBeamSearch(CentralizedSegmentedBeamSearcher):
         history:    past transcriptions associated with past audio segments
         src_seg_pad:padding of current src since different beam may use different audio segment
         """
-        # inp_tokens may have eos from previous segment, 
-        # but will be masked by "padding" inside the decode()
-        memory = _update_mem_seg(inp_tokens, memory)
+        memory = self._update_mem_seg(inp_tokens, memory)
         pred, attn = self.model.decode_oracle(history, src, memory, )
-        # print( f"final pred: {pred.shape} " )
-        # prepare mask here since pred true len vaires. mask the unrelated logits
         logits = self.fc(pred) / self.temperature 
         prob_dist = self.softmax(logits)
-        # print("prob_dist:", prob_dist.shape)
         return prob_dist, memory, attn
-        # return prob_dist[:, -1, :], memory, attn
 
-    def lm_forward_step(self, inp_tokens, memory):
+    def lm_forward_step(self, inp_tokens, memory, history):
         """Performs a step in the implemented LM module."""
-        memory = _update_mem(inp_tokens, memory)
+        memory = self._update_mem_seg(inp_tokens, memory)
         if not next(self.lm_modules.parameters()).is_cuda:
             self.lm_modules.to(inp_tokens.device)
-        logits = self.lm_modules(memory)
+        # left padd + history + memory
+        max_len = max([ len(m)+len(h) for m,h in zip(memory,history)])
+        padded = []
+        for idx in range(len(inp_tokens)):
+            h_len = len(history[idx])
+            m_len = len(memory[idx])
+            data = torch.tensor( [0]*(max_len - h_len - m_len ) + history[idx] + memory[idx] )
+            padded.append(data)
+        padded = pad_sequence(padded, batch_first = True).to(inp_tokens.device)
+        logits = self.lm_modules(padded)
         log_probs = self.softmax(logits / self.temperature_lm)
         return log_probs[:, -1, :], memory
 
