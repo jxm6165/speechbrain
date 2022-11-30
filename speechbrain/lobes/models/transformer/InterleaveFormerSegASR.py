@@ -314,10 +314,12 @@ class InterleaveFormerASR(InterleaveFormerInterface):
                 b , t, ch1, ch2 = audio_seg.shape
                 audio_seg = audio_seg.reshape(b , t, ch1 * ch2)
             audio_seg_emb = self.custom_src_module( audio_seg )
-            history_offset = torch.zeros(1,len(h), audio_seg_emb.shape[2]).to(audio_seg_emb.device)
+
+            history_offset = torch.zeros(1, history_emb.shape[1], audio_seg_emb.shape[2]).to(audio_seg_emb.device)
+            
             audio_seg_emb = ( audio_seg_emb + self.positional_encoding(
                 torch.cat([ history_offset, audio_seg_emb], dim = 1)
-              )[:,len(h):,:]
+              )[:,history_offset.shape[1]:,:]
             ).squeeze(0)
             # present on-going transcription embedding
             m_raw = memory[idx]
