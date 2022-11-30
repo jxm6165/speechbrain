@@ -300,29 +300,33 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             # past transcription embedding
             hist = torch.tensor(np.array(h)).to(src[0].device).unsqueeze(0)
             history_emb = self.custom_tgt_module( hist )
-            # print( f"history_emb: {history_emb.shape} {self.positional_encoding(history_emb).shape}" )
             if len(h) > 0:
                 # print("Check h len:", len(h), h[-10:])
-                if len(h) > 1000:
+                if len(h) > 100:
                     # if history is super long that is exceeding max pos emb
-                    history_emb = history_emb[:,-500:, :]
+                    history_emb = history_emb[:,-100:, :]
                 history_emb = history_emb + self.positional_encoding(history_emb)
             history_emb = history_emb.squeeze(0)
+            
             # present audio embedding
             audio_seg = src[idx].unsqueeze(0) 
             if audio_seg.ndim == 4:
                 b , t, ch1, ch2 = audio_seg.shape
                 audio_seg = audio_seg.reshape(b , t, ch1 * ch2)
             audio_seg_emb = self.custom_src_module( audio_seg )
-            audio_seg_emb = ( audio_seg_emb + self.positional_encoding(audio_seg_emb) ).squeeze(0)
+            history_offset = torch.zeros(1,len(h), audio_seg_emb.shape[2]).to(audio_seg_emb.device)
+            audio_seg_emb = ( audio_seg_emb + self.positional_encoding(
+                torch.cat([ history_offset, audio_seg_emb], dim = 1)
+              )[:,len(h):,:]
+            ).squeeze(0)
             # present on-going transcription embedding
-            # print("memory:", mem, "idx:", idx)
             m_raw = memory[idx]
-            # if len(m_raw) > 1500:
-            #     print(m_raw)
             mem = torch.tensor( np.array(m_raw) ).to(audio_seg_emb.device).unsqueeze(0)
             memory_emb = self.custom_tgt_module( mem )
-            memory_emb = memory_emb + self.positional_encoding(memory_emb)
+            # print("Mem emb:", torch.cat([history_offset, memory_emb], dim = 1)[:,len(h):,:].shape, memory_emb.shape)
+            memory_emb = memory_emb + self.positional_encoding(
+                torch.cat([history_offset, memory_emb], dim = 1)[:,len(h):,:]
+            )
             memory_emb = memory_emb.squeeze(0)
             # final interleaved sample and its modalities
             hist_audio_mem = torch.cat( [ history_emb, audio_seg_emb, memory_emb ], dim = 0)
