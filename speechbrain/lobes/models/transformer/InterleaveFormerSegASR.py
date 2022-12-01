@@ -316,7 +316,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             audio_seg_emb = self.custom_src_module( audio_seg )
 
             history_offset = torch.zeros(1, history_emb.shape[1], audio_seg_emb.shape[2]).to(audio_seg_emb.device)
-            
+
             audio_seg_emb = ( audio_seg_emb + self.positional_encoding(
                 torch.cat([ history_offset, audio_seg_emb], dim = 1)
               )[:,history_offset.shape[1]:,:]
@@ -327,7 +327,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             memory_emb = self.custom_tgt_module( mem )
             # print("Mem emb:", torch.cat([history_offset, memory_emb], dim = 1)[:,len(h):,:].shape, memory_emb.shape)
             memory_emb = memory_emb + self.positional_encoding(
-                torch.cat([history_offset, memory_emb], dim = 1)[:,len(h):,:]
+                torch.cat([history_offset, memory_emb], dim = 1)[:,history_offset.shape[1]:,:]
             )
             memory_emb = memory_emb.squeeze(0)
             # final interleaved sample and its modalities
