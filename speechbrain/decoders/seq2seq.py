@@ -562,59 +562,127 @@ class S2SBeamSearcher(S2SBaseSearcher):
         new_history = copy.deepcopy(history)
         is_eos = inp_tokens.eq(self.eos_index)
         (eos_indices,) = torch.nonzero(is_eos, as_tuple=True)
-        # truly eos means all segments are consumed and we met eos
-        true_eos = torch.logical_and(is_eos, torch.tensor( np.array( seg_progress ) >= num_seg - 1 ).to(is_eos.device) )
-        # Store the hypothesis and their scores when reaching eos.
-
-        # loop through each beam
+        eos_indices_numpy = eos_indices.cpu().numpy()
         for index in range(len(memory)):
-            eos_indices_numpy = eos_indices.cpu().numpy()
-            if index in eos_indices_numpy:
-                batch_id = torch.div(
-                    index, self.beam_size, rounding_mode="floor"
-                )
+            #  We end the search if at the last segment and if eos or out of decoding step
+            if (index in eos_indices_numpy and seg_progress[index] >= num_seg - 1) or ( seg_progress[index] >= num_seg - 1 and len(memory[index]) > 12):
+                # set those cases where eos is not outputed but actually need to be eos
+                is_eos[index] = True
+
+                batch_id = torch.div( index, self.beam_size, rounding_mode="floor"  )
                 if len(hyps_and_scores[batch_id]) == self.beam_size:
                     continue
+                # get rid of eos within hyp if any
                 hyp = alived_seq[index, :]
-                if seg_progress[index] >= num_seg - 1:
-                    # truely eos: input is eos and reach the last audio segment
-                    log_probs = alived_log_probs[index, :]
-                    final_scores = scores[index] + self.length_rewarding * (
-                        timesteps + 1
-                    )
-                    pre = hyp[:-1]
-                    last =  hyp[-1].unsqueeze(0)
-                    hist =  pre.cpu().numpy()
-                    eos_mask = hist != self.eos_index
-                    hist = torch.tensor( hist[eos_mask] ).to(hyp.device)
-                    hyp = torch.cat( [ hist, last ] )
-                    hyps_and_scores[batch_id].append((hyp, log_probs, final_scores))
-                else:
-                    # eos but not reaching the last audio segment
-                    # then refresh the history
-                    hist =  hyp.cpu().numpy()
-                    if self.eos_index in hist:
-                        hist = hist[hist != self.eos_index]
-                    new_history[index] += list( hist )
-                    seg_progress[index] += 1
-            
-            else: 
-                # Also update seg_progress if an audio seg is consumed 
-                # restrict each audio seg to 10 word token
-                if len(memory[index]) > 10:
+                hypothesis = hyp.cpu().numpy()
+                eos_mask = hypothesis != self.eos_index
+                # manually add hyp + eos back
+                # print( f"Check if history is partial consistent with hyp: {history[index]}, {list(hypothesis[eos_mask])} ")
+                # modifying history maynot be necessary because this path will be set to inf score later
+                hist = list( hypothesis[eos_mask] )
+                old_hist = hist[:]
+                # print(f"index: {index} {seg_progress[index] }/{num_seg }, {hist} {inp_tokens} {memory[index]}")
+                if inp_tokens[index] != self.eos_index:
+                    hist += [ inp_tokens.detach().cpu().numpy()[index] ]
+                # alive seq has everything, No "+=", but '=
+                new_history[index] = hist
+                # assert False, f"{[hypothesis[eos_mask]]} {[self.eos_index]}"
+                hypothesis = torch.tensor( old_hist + [self.eos_index] ).to(hyp.device)
+                log_probs = alived_log_probs[index, :]
+                final_scores = scores[index] + self.length_rewarding * (
+                    timesteps + 1
+                )
+                hyps_and_scores[batch_id].append((hypothesis, log_probs, final_scores))
+            else:
+                # the search is not done yet
+                # not reaching last seg but out of decoding budget or eos of current segment:
+                if len(memory[index]) > 12 or index in eos_indices_numpy:
+                    # set token to eos so that update_mem_seg will knows to refresh memory to bos
                     inp_tokens[index] = self.eos_index
-                    # let update_mem_seg() later to reset memory to [bos] using inp_tok == eos
-                    if seg_progress[index] + 1 < num_seg:
-                        seg_progress[index] += 1
-                    else:
-                        inp_tokens[index] = 2
-                    hyp = alived_seq[index, :]
-                    hist =  hyp.cpu().numpy()
+                    hist =  alived_seq[index, :].cpu().numpy()
                     if self.eos_index in hist:
                         hist = hist[hist != self.eos_index]
-                    new_history[index] += list( hist )
+                    # alive seq has everything, No "+=", but '=
+                    new_history[index] = list( hist )
+                    seg_progress[index] += 1
+                else:
+                    # not reaching decoding budget 12 or eos.
+                    # nothing has to be done
+                    pass
 
-        return true_eos, inp_tokens, new_history
+        return is_eos, inp_tokens, new_history
+
+        # # loop through each beam
+        # for index in range(len(memory)):
+        #     eos_indices_numpy = eos_indices.cpu().numpy()
+        #     if index in eos_indices_numpy:
+        #         batch_id = torch.div(
+        #             index, self.beam_size, rounding_mode="floor"
+        #         )
+        #         if len(hyps_and_scores[batch_id]) == self.beam_size:
+        #             continue
+        #         hyp = alived_seq[index, :]
+        #         if seg_progress[index] >= num_seg - 1:
+        #             # truely eos: input is eos and reach the last audio segment
+        #             log_probs = alived_log_probs[index, :]
+        #             final_scores = scores[index] + self.length_rewarding * (
+        #                 timesteps + 1
+        #             )
+        #             # Below, Why using hyp? It is from last iteration. Should alive_seq instead!
+        #             pre = hyp[:-1]
+        #             last =  hyp[-1].unsqueeze(0)
+        #             hist =  pre.cpu().numpy()
+        #             eos_mask = hist != self.eos_index
+        #             hist = history[index] + list(hist[eos_mask])
+        #             hist = torch.tensor( hist ).to(hyp.device)
+        #             hyp = torch.cat( [ hist, last ] )
+        #             hyps_and_scores[batch_id].append((hyp, log_probs, final_scores))
+        #         else:
+        #             # eos but not reaching the last audio segment
+        #             # then refresh the history
+        #             hist =  hyp.cpu().numpy()
+        #             if self.eos_index in hist:
+        #                 hist = hist[hist != self.eos_index]
+        #             new_history[index] += list( hist )
+        #             seg_progress[index] += 1
+            
+        #     else: 
+        #         # Also update seg_progress if an audio seg is consumed 
+        #         # restrict each audio seg to 10 word token by setting its inp_token = eos
+        #         if len(memory[index]) > 12:
+        #             inp_tokens[index] = self.eos_index
+        #             # let update_mem_seg() later to reset memory to [bos] using inp_tok == eos
+        #             if seg_progress[index] + 1 < num_seg:
+        #                 seg_progress[index] += 1
+        #             else:
+        #                 # approach the last seg and out of decoding budget, manually eos
+        #                 true_eos[index] = True
+        #                 # retrive hypothesis
+        #                 batch_id = torch.div(index, self.beam_size, rounding_mode="floor")
+        #                 if len(hyps_and_scores[batch_id]) == self.beam_size:
+        #                     continue
+        #                 hyp = alived_seq[index, :]
+        #                 log_probs = alived_log_probs[index, :]
+        #                 final_scores = scores[index] + self.length_rewarding * (
+        #                     timesteps + 1
+        #                 )
+        #                 pre = hyp[:-1]
+        #                 last =  hyp[-1].unsqueeze(0)
+        #                 hist =  pre.cpu().numpy()
+        #                 eos_mask = hist != self.eos_index
+        #                 hist = history[index] + list(hist[eos_mask])
+        #                 hist = torch.tensor( hist ).to(hyp.device)
+        #                 hyp = torch.cat( [ hist, last ] )
+        #                 hyps_and_scores[batch_id].append((hyp, log_probs, final_scores))
+
+        #                 # don't care about history anymore
+        #             hyp = alived_seq[index, :]
+        #             hist =  hyp.cpu().numpy()
+        #             if self.eos_index in hist:
+        #                 hist = hist[hist != self.eos_index]
+        #             new_history[index] += list( hist )
+
+        # return true_eos, inp_tokens, new_history
 
     def _get_top_score_prediction(self, hyps_and_scores, topk):
         """This method sorts the scores and return corresponding hypothesis and log probs.
@@ -2055,17 +2123,8 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
         device = enc_states.device
         enc_lens = torch.round(enc_states.shape[1] * wav_len).int()
 
-        # uniform audio segmentation during inference
         assert audio_stats.shape[0] == batch_size , f"decoding batch size must be 1"
         audio_stats =  audio_stats[0] # batchsize is 1
-        # max_l = max(audio_stats)
-        # if len(set(audio_stats)) == 3 or len(set(audio_stats)) == 2:
-        #     # uniformly segment the audio during inference into 2 segment if originally it has 2-3
-        #     audio_stats = np.array([ max_l//2, max_l ])
-        # elif len(set(audio_stats)) > 3:
-        #     # no matter how many segs, make them to 3 uniformly!
-        #     delta_3 = max_l//3
-        #     audio_stats = np.array([ delta_3, delta_3*2, delta_3*3, max_l ])
 
         # different beam may ends up with different lengths. Thus, use list instead of tensor
         # history stores the transcriptions of all past audio segments
@@ -2155,8 +2214,6 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
         for t in range(max_decode_steps):
             # print("decode step:", t, " in ", max_decode_steps)
             # print("Check seg progress:", np.array(seg_progress)/num_seg )
-            # print(memory)
-            # print()
             # terminate condition
             # if all beam has met eos of their LAST segment
             if self._check_full_beams(hyps_and_scores, self.beam_size):
@@ -2171,9 +2228,11 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
                 src_seg.append(_seg)
 
             # InterleaveFormer decode
+            # print("Before model:", memory, inp_tokens.cpu().numpy())
             log_probs, memory, attn = self.forward_step(
                 inp_tokens, memory, src_seg , history
             )
+            # print("After model:", memory, inp_tokens.cpu().numpy())
             log_probs = self.att_weight * log_probs
 
             # Keep the original value
@@ -2214,7 +2273,6 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
             if self.ctc_weight > 0:
                 # fix this later
                 g = alived_seq
-
                 # block blank token
                 log_probs[:, self.blank_index] = self.minus_inf
                 if self.ctc_weight != 1.0 and self.ctc_score_mode == "partial":
@@ -2224,8 +2282,6 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
                     )
                 else:
                     ctc_candidates = None
-                # print("g shape: ", g.shape)
-                # print("g[0]: ", g[0])
                 ctc_log_probs, ctc_memory = ctc_scorer.forward_step(
                     g, ctc_memory, ctc_candidates, attn
                 )
@@ -2262,10 +2318,8 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
                 + self.beam_offset.unsqueeze(1).expand_as(candidates)
             ).view(batch_size * self.beam_size)
 
-            # print("Before permute:", memory)
             # Permute the memory to synchoronize with the output.
             memory = self.permute_mem_seg(memory, index=predecessors)
-            # print("After permute:", memory)
             if self.lm_weight > 0:
                 lm_memory = self.permute_lm_mem(lm_memory, index=predecessors)
 
@@ -2281,33 +2335,7 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
 
             # Add coverage penalty
             if self.coverage_penalty > 0:
-                cur_attn = torch.index_select(attn, dim=0, index=predecessors)
-
-                # coverage: cumulative attention probability vector
-                if t == 0:
-                    # Init coverage
-                    self.coverage = cur_attn
-
-                # the attn of transformer is [batch_size*beam_size, current_step, source_len]
-                if len(cur_attn.size()) > 2:
-                    self.converage = torch.sum(cur_attn, dim=1)
-                else:
-                    # Update coverage
-                    self.coverage = torch.index_select(
-                        self.coverage, dim=0, index=predecessors
-                    )
-                    self.coverage = self.coverage + cur_attn
-
-                # Compute coverage penalty and add it to scores
-                penalty = torch.max(
-                    self.coverage, self.coverage.clone().fill_(0.5)
-                ).sum(-1)
-                penalty = penalty - self.coverage.size(-1) * 0.5
-                penalty = penalty.view(batch_size * self.beam_size)
-                penalty = (
-                    penalty / (t + 1) if self.length_normalization else penalty
-                )
-                scores = scores - penalty * self.coverage_penalty
+                pass
 
             # Update alived_seq
             alived_seq = torch.cat(
@@ -2334,7 +2362,6 @@ class CentralizedSegmentedBeamSearcher(S2SBeamSearcher):
             # is_eos means eos and at the last segment
             # this function will update history if reach eos but not the last segment
             # if eos and also last segment, hyp_scores will be updated
-            # assert False, f"{alived_log_probs.shape} {alived_seq.shape}\n{alived_seq}"
             is_eos,inp_tokens,history = self._update_hyp_and_scores_seg(
                 seg_progress,
                 memory,
@@ -2396,41 +2423,12 @@ class refresh_and_remove():
       
     def check_and_replace(self, tokens, memory):
         # add each token to the memory
-        # print("Overall tokens", tokens)
         new_memory = [ [] for _ in range(len(tokens))]
         for i,tok in enumerate(tokens):
-            # print("tok", tok, ' at beam', i)
             if tok == 2:
                 new_memory[i] = [1]
-                # print("eos memory",new_memory[i])
-                continue
-            new_memory[i] = memory[i] + [ tok ]
-            # check repetition of tri-gram
-            if len(memory[i]) > 3:
-                if memory[i][-3:] in self.pool1[i]:
-                    new_memory[i] = memory[i][:-3]
-                    # clear pool
-                    self.pool2 = {key:[] for key in range(self.beam_size)}
-                    self.pool1 = {key:[] for key in range(self.beam_size)}
-                    continue
-                else:
-                    if len( self.pool1[i] ) >= self.capacity1:
-                        self.pool1[i].pop(0)
-                    self.pool1[i].append(memory[i][-3:])
-            # check repetition of 4-gram
-            if len(memory[i]) > 4:
-                if memory[i][-4:] in self.pool2[i]:
-                    new_memory[i] = memory[i][:-4]
-                    # clear pool1
-                    self.pool1 = {key:[] for key in range(self.beam_size)}
-                    self.pool2 = {key:[] for key in range(self.beam_size)}
-                else:
-                    if len( self.pool2[i] ) >= self.capacity2:
-                        self.pool2[i].pop(0)
-                    self.pool2[i].append(memory[i][-4:])
-            # ensure first 1 is bos
-            if new_memory[i][0] != 1:
-                new_memory[i] = [1] +new_memory[i]
+            else:
+                new_memory[i] = memory[i] + [ tok ]
         return new_memory
 
 class InterleaveFormerSegmentedBeamSearch(CentralizedSegmentedBeamSearcher):
