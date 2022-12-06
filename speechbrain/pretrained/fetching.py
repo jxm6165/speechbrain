@@ -107,8 +107,8 @@ def fetch(
         # Interpret source as local directory path
         # Just symlink
         sourcepath = pathlib.Path(sourcefile).absolute()
-        MSG = f"Fetch {filename}: Linking to local file in {str(sourcepath)}."
-        logger.info(MSG)
+        # MSG = f"Fetch {filename}: Linking to local file in {str(sourcepath)}."
+        # logger.info(MSG)
         _missing_ok_unlink(destination)
         destination.symlink_to(sourcepath)
     else:

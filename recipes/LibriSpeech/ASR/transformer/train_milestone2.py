@@ -35,6 +35,14 @@ from speechbrain.alignment.ctc_segmentation import CTCSegmentation
 import gc
 logger = logging.getLogger(__name__)
 
+def check_seg(audio, text, key = None):
+    valid = []
+    assert len(audio) == len(text)
+    for idx in range(len(audio)):
+        if len(set(audio[idx])) == len(set(text[idx])):
+            valid.append(idx)
+    return valid
+
 # Define training procedure
 class ASR(sb.core.Brain):
     def compute_forward(self, batch, stage):
@@ -82,11 +90,22 @@ class ASR(sb.core.Brain):
             # create dict to contain all stats
             stats_dict = {}
             stats_dict["audio_stats"] = audio_stats
+            stats_dict["text_stats"] = text_stats
+            valid = check_seg(audio_stats, text_stats)
+            audio_stats = audio_stats[valid]
+            text_stats = text_stats[valid]
             stats_dict["batch_token_seg_bos"] = batch_token_seg_bos
             stats_dict["batch_token_seg_eos"] = batch_token_seg_eos
             stats_dict["batch_tokens_eos_len"] = batch_tokens_eos_len
             stats_dict["batch_tokens_len"] = batch_tokens_len
-            stats_dict["text_stats"] = text_stats
+            stats_dict["valid"] = valid
+            
+            batch_token_seg_bos = batch_token_seg_bos[valid]
+            batch_token_seg_eos = batch_token_seg_eos[valid]
+            batch_tokens_eos_len = batch_tokens_eos_len[valid]
+            batch_tokens_len = batch_tokens_len[valid]
+            src = src[valid]
+            
 
             # save to batch_stats, which is a list of dicts. This will be used to store stats and read from pkl
             if stage == sb.Stage.TRAIN:
@@ -107,14 +126,28 @@ class ASR(sb.core.Brain):
                 stats_dict = self.test_batch_stats[str(batch.id)]
             
             audio_stats = stats_dict["audio_stats"]
-            batch_token_seg_bos = stats_dict["batch_token_seg_bos"]
-            batch_token_seg_eos = stats_dict["batch_token_seg_eos"]
-            batch_tokens_eos_len = stats_dict["batch_tokens_eos_len"]
-            batch_tokens_len = stats_dict["batch_tokens_len"]
             text_stats = stats_dict["text_stats"]
+            if 'valid' in stats_dict:
+                valid =  stats_dict["valid"]
+            else:
+                valid = check_seg(audio_stats, text_stats)
+            audio_stats = audio_stats[valid]
+            text_stats = text_stats[valid]
+            batch_token_seg_bos = stats_dict["batch_token_seg_bos"][valid]
+            batch_token_seg_eos = stats_dict["batch_token_seg_eos"][valid]
+            batch_tokens_eos_len = stats_dict["batch_tokens_eos_len"][valid]
+            batch_tokens_len = stats_dict["batch_tokens_len"][valid]
+            src = src[valid]
+            tokens, tokens_lens = batch.tokens
+            tokens = tokens[valid]
+            tokens_lens = tokens_lens[valid]
+            wav_lens = wav_lens[valid]
+            
         
         # batch_tokens_len is  batch.tokens_len
         seg_stats = [audio_stats, text_stats]
+
+        assert len(set(audio_stats[0])) < 20, f"num seg > 20, audio_stats[0]"
 
         # enc_out is the audio representation + text representation
         encoded_output, modalities = self.modules.Transformer(
@@ -127,10 +160,10 @@ class ASR(sb.core.Brain):
 
  
         for i, encoded in enumerate(encoded_output):
-          a = encoded[modalities[i]==1]
-          t = encoded[modalities[i]==2]
-          audio_representation.append(a)
-          text_representation.append(t)
+            a = encoded[modalities[i]==1]
+            t = encoded[modalities[i]==2]
+            audio_representation.append(a)
+            text_representation.append(t)
 
         audio_representation = pad_sequence( audio_representation, batch_first=True )
         text_representation = pad_sequence( text_representation, batch_first=True )
@@ -156,11 +189,11 @@ class ASR(sb.core.Brain):
                 
                 # be aware, it is src that is put into the search. 
                 # since InterleaveFormer now inefficiently recompute everything 
-                hyps, _ = self.hparams.valid_search(audio_representation.detach(), src.detach(), audio_stats, wav_lens)
+                hyps, _ = self.hparams.valid_search(src, batch_token_seg_bos, seg_stats = seg_stats)
         elif stage == sb.Stage.TEST:
-            hyps, _ = self.hparams.test_search( audio_representation.detach(), src.detach(), audio_stats,  wav_lens)
+            hyps, _ = self.hparams.test_search( src, batch_token_seg_bos, seg_stats = seg_stats)
         
-        return p_ctc, p_seq, wav_lens, hyps, batch_token_seg_eos, torch.tensor( batch_tokens_eos_len).to(encoded_output.device)
+        return p_ctc, p_seq, wav_lens, hyps, batch_token_seg_eos, torch.tensor( batch_tokens_eos_len).to(encoded_output.device),  tokens, tokens_lens
 
 
     def segment_eos_bos(self, token_bos, text_stats):
@@ -221,12 +254,11 @@ class ASR(sb.core.Brain):
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
-
-        (p_ctc, p_seq, wav_lens, hyps, tokens_eos, tokens_eos_lens) = predictions
+        (p_ctc, p_seq, wav_lens, hyps, tokens_eos, tokens_eos_lens, tokens, tokens_lens) = predictions
 
         ids = batch.id
         # tokens_eos, tokens_eos_lens = batch.tokens_eos
-        tokens, tokens_lens = batch.tokens
+        # tokens, tokens_lens = batch.tokens
 
         if hasattr(self.modules, "env_corrupt") and stage == sb.Stage.TRAIN:
             tokens_eos = torch.cat([tokens_eos, tokens_eos], dim=0)
@@ -262,6 +294,8 @@ class ASR(sb.core.Brain):
                     tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in hyps
                 ]
                 target_words = [wrd.split(" ") for wrd in batch.wrd]
+                # print("Pred:", predicted_words[0][:10])
+                # print("Targ:", target_words[0][:10])
                 self.wer_metric.append(ids, predicted_words, target_words)
 
             # compute the accuracy of the one-step-forward prediction
@@ -315,10 +349,10 @@ class ASR(sb.core.Brain):
 
                 # anneal lr every update
                 self.hparams.noam_annealing(self.optimizer)
-        del batch
-        del outputs
-        gc.collect()
-        torch.cuda.empty_cache()
+        # del batch
+        # del outputs
+        # gc.collect()
+        # torch.cuda.empty_cache()
 
         return loss.detach().cpu()
 
@@ -327,10 +361,10 @@ class ASR(sb.core.Brain):
         with torch.no_grad():
             predictions = self.compute_forward(batch, stage=stage)
             loss = self.compute_objectives(predictions, batch, stage=stage)
-        del batch
-        del predictions
-        gc.collect()
-        torch.cuda.empty_cache()
+        # del batch
+        # del predictions
+        # gc.collect()
+        # torch.cuda.empty_cache()
         return loss.detach()
 
     def on_stage_start(self, stage, epoch):
@@ -510,7 +544,7 @@ def dataio_prepare(hparams, have_pkl=True):
     sb.dataio.dataset.add_dynamic_item(datasets, text_pipeline)
     
     
-    # Generate segments if no stats pkl saved(Ours)
+# Generate segments if no stats pkl saved(Ours)
     # load an ASR model and CTC aligner
     if sum(have_pkl) < 3:
         pre_trained = "speechbrain/asr-transformer-transformerlm-librispeech"
@@ -518,17 +552,36 @@ def dataio_prepare(hparams, have_pkl=True):
         aligner = CTCSegmentation(asr_model, kaldi_style_text=False)
 
         def get_audio_seg(wav, wrd):
+            # Get aligned timestamps by CTC aligner
             text = [" "+ sing_wrd + " " for sing_wrd in wrd.split(" ")]
-
             segs = aligner(wav, text)
-
             intervals = segs.segments
-            seg_points_in_time = list(list(zip(*intervals))[1])
+            time_end_array = np.array(list(list(zip(*intervals))[1]))
+            
+            # deal with audio length < 2 sec, only one segment
+            if max(time_end_array) <= 2:
+                return [round(max(time_end_array)*16000)+1], [text]
+            
+            rounded_end = np.floor(max(time_end_array))
+            max_end = int(rounded_end) + 1 if rounded_end % 2 == 0 else int(rounded_end)
+            interval_range = list(range(2, max_end, 2))
+            seg_index = [np.searchsorted(time_end_array, interval, side='right') - 1 for interval in interval_range]
+            
+            # if the last bin only has one word, we want to merge it to the previous one
+            if seg_index[-1] == len(time_end_array) - 2:
+                seg_index[-1] = len(time_end_array) - 1
+            else:
+                seg_index.append(len(time_end_array) - 1)
+            
+            seg_points_in_time = time_end_array[seg_index]
             audio_seg_points = [round(seg_point*16000)+1 for seg_point in seg_points_in_time]
-            return audio_seg_points
+            seg_pts = [index + 1 for index in seg_index]
+            seg_pts.insert(0, 0)
+            binned_wrds = [text[seg_pts[i]:seg_pts[i+1]] for i in range(len(seg_pts)-1)]
+            return audio_seg_points, binned_wrds
 
         def get_token_seg(wrds):
-            token_seg = [tokenizer.encode_as_ids(wrd) for wrd in wrds]
+            token_seg = [tokenizer.encode_as_ids(' '.join(bin_wrd)) for bin_wrd in wrds]
             return [len(functools.reduce(operator.iconcat, token_seg[:i+1], [])) for i in range(len(token_seg))]
 
 
@@ -536,9 +589,9 @@ def dataio_prepare(hparams, have_pkl=True):
         @sb.utils.data_pipeline.provides("audio_seg_points", "token_seg_points")
 
         def generate_segments(wav, wrd):
-            audio_seg_points = get_audio_seg(wav, wrd)
+            audio_seg_points, binned_wrds  = get_audio_seg(wav, wrd)
             yield audio_seg_points
-            token_seg_points = get_token_seg(wrd.split(' '))
+            token_seg_points = get_token_seg(binned_wrds)
             yield token_seg_points
 
         if have_pkl[0] == 0:
@@ -726,4 +779,3 @@ if __name__ == "__main__":
             max_key="ACC",
             test_loader_kwargs=hparams["test_dataloader_opts"],
         )
-

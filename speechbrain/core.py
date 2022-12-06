@@ -1019,7 +1019,11 @@ class Brain:
             dynamic_ncols=True,
             disable=not enable,
         ) as t:
+            cnt = 0
             for batch in t:
+                cnt += 1
+                # if cnt > 10:
+                #     break
                 if self._optimizer_step_limit_exceeded:
                     logger.info("Train iteration limit exceeded")
                     break
