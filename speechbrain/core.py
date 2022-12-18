@@ -986,17 +986,17 @@ class Brain:
 
     def _fit_train(self, train_set, epoch, enable):
         # Create a list of dict to store or read train batch stats from pickle
-        OPT_FILE = 'train_batch_stats.pkl'
-        save_opt = os.path.join(self.data_folder, OPT_FILE)
-        stats_file = pathlib.Path(save_opt)
-        if stats_file.is_file():
-            logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
-            self.train_batch_stats = load_pkl(save_opt)
-            self.gen_pkl = False
-        else:
-            logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
-            self.train_batch_stats = {}
-            self.gen_pkl = True
+#         OPT_FILE = 'train_batch_stats.pkl'
+#         save_opt = os.path.join(self.data_folder, OPT_FILE)
+#         stats_file = pathlib.Path(save_opt)
+#         if stats_file.is_file():
+#             logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
+#             self.train_batch_stats = load_pkl(save_opt)
+#             self.gen_pkl = False
+#         else:
+#             logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
+#             self.train_batch_stats = {}
+#             self.gen_pkl = True
         
         # Training stage
         self.on_stage_start(Stage.TRAIN, epoch)
@@ -1063,10 +1063,10 @@ class Brain:
         self.on_stage_end(Stage.TRAIN, self.avg_train_loss, epoch)
         
         # save to pickle
-        if not stats_file.is_file():
-            logger.info("%s saved in %s." % (OPT_FILE, save_opt))
-            save_pkl(self.train_batch_stats, save_opt)
-            self.gen_pkl = False
+#         if not stats_file.is_file():
+#             logger.info("%s saved in %s." % (OPT_FILE, save_opt))
+#             save_pkl(self.train_batch_stats, save_opt)
+#             self.gen_pkl = False
         
         self.avg_train_loss = 0.0
         self.step = 0
@@ -1075,17 +1075,17 @@ class Brain:
         # Validation stage
         if valid_set is not None:
             # Create a list of dict to store and read valid batch stats from pickle
-            OPT_FILE = 'valid_batch_stats.pkl'
-            save_opt = os.path.join(self.data_folder, OPT_FILE)
-            stats_file = pathlib.Path(save_opt)
-            if stats_file.is_file():
-                logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
-                self.valid_batch_stats = load_pkl(save_opt)
-                self.gen_pkl = False
-            else:
-                logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
-                self.valid_batch_stats = {}
-                self.gen_pkl = True
+#             OPT_FILE = 'valid_batch_stats.pkl'
+#             save_opt = os.path.join(self.data_folder, OPT_FILE)
+#             stats_file = pathlib.Path(save_opt)
+#             if stats_file.is_file():
+#                 logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
+#                 self.valid_batch_stats = load_pkl(save_opt)
+#                 self.gen_pkl = False
+#             else:
+#                 logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
+#                 self.valid_batch_stats = {}
+#                 self.gen_pkl = True
             
             self.on_stage_start(Stage.VALID, epoch)
             self.modules.eval()
@@ -1113,10 +1113,10 @@ class Brain:
 
                     # Only run validation "on_stage_end" on main process
                     # save to pickle
-                    if not stats_file.is_file():
-                        logger.info("%s saved in %s." % (OPT_FILE, save_opt))
-                        save_pkl(self.valid_batch_stats, save_opt)
-                        self.gen_pkl = False
+#                     if not stats_file.is_file():
+#                         logger.info("%s saved in %s." % (OPT_FILE, save_opt))
+#                         save_pkl(self.valid_batch_stats, save_opt)
+#                         self.gen_pkl = False
                     self.step = 0
                     run_on_main(
                         self.on_stage_end,
@@ -1297,17 +1297,17 @@ class Brain:
         average test loss
         """
         # Create a list of dict to store or read train batch stats from pickle
-        OPT_FILE = 'test_batch_stats.pkl'
-        save_opt = os.path.join(self.data_folder, OPT_FILE)
-        stats_file = pathlib.Path(save_opt)
-        if stats_file.is_file():
-            logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
-            self.test_batch_stats = load_pkl(save_opt)
-            self.gen_pkl = False
-        else:
-            logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
-            self.test_batch_stats = {}
-            self.gen_pkl = True
+#         OPT_FILE = 'test_batch_stats.pkl'
+#         save_opt = os.path.join(self.data_folder, OPT_FILE)
+#         stats_file = pathlib.Path(save_opt)
+#         if stats_file.is_file():
+#             logger.info("%s exists. Load from %s." % (OPT_FILE, save_opt))
+#             self.test_batch_stats = load_pkl(save_opt)
+#             self.gen_pkl = False
+#         else:
+#             logger.info("%s not exist. %s will be generated in the next epoch." % (save_opt, OPT_FILE))
+#             self.test_batch_stats = {}
+#             self.gen_pkl = True
         
         if progressbar is None:
             progressbar = not self.noprogressbar
@@ -1346,10 +1346,10 @@ class Brain:
 
                 # Only run evaluation "on_stage_end" on main process
                 # save to pickle
-                if not stats_file.is_file():
-                    logger.info("%s saved in %s." % (OPT_FILE, save_opt))
-                    save_pkl(self.test_batch_stats, save_opt)
-                    self.gen_pkl = False
+#                 if not stats_file.is_file():
+#                     logger.info("%s saved in %s." % (OPT_FILE, save_opt))
+#                     save_pkl(self.test_batch_stats, save_opt)
+#                     self.gen_pkl = False
                 run_on_main(
                     self.on_stage_end, args=[Stage.TEST, avg_test_loss, None]
                 )
