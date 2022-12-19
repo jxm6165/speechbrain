@@ -48,7 +48,7 @@ ckpt_interval_minutes: 30 # save checkpoint every N min
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
 number_of_epochs: 60
-batch_size: 25 # This works for 1x GPU with 40GB
+batch_size: 24 # This works for 1x 16 GB GPU with mixed precision
 ctc_weight: 0.3
 grad_accumulation_factor: 2
 max_grad_norm: 5.0
@@ -108,7 +108,7 @@ min_decode_ratio: 0.0
 max_decode_ratio: 1.0
 valid_search_interval: 10
 valid_beam_size: 10
-test_beam_size: 66
+test_beam_size: 33
 lm_weight: 0.60
 ctc_weight_decode: 0.40
 
@@ -222,7 +222,7 @@ seq_cost: !name:speechbrain.nnet.losses.kldiv_loss
 
 noam_annealing: !new:speechbrain.nnet.schedulers.NoamScheduler
     lr_initial: !ref <lr_adam>
-    n_warmup_steps: 3000
+    n_warmup_steps: 5000
     #model_size: !ref <d_model>
 
 checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer

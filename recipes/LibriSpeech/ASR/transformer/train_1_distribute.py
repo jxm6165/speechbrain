@@ -195,6 +195,10 @@ class ASR(sb.core.Brain):
         with torch.no_grad():
             predictions = self.compute_forward(batch, stage=stage)
             loss = self.compute_objectives(predictions, batch, stage=stage)
+        del batch
+        del predictions
+        gc.collect()
+        torch.cuda.empty_cache()
         return loss.detach()
 
     def on_stage_start(self, stage, epoch):
