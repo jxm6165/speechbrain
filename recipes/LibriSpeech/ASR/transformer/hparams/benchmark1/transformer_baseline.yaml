@@ -48,11 +48,7 @@ ckpt_interval_minutes: 30 # save checkpoint every N min
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
 number_of_epochs: 60
-<<<<<<< HEAD
 batch_size: 24 # This works for 1x 16 GB GPU with mixed precision
-=======
-batch_size: 24 # This works for 1x GPU with 16GB + mix precision
->>>>>>> 252f31d7f733ec0559f98a52acba83347dd4bb04
 ctc_weight: 0.3
 grad_accumulation_factor: 2
 max_grad_norm: 5.0
