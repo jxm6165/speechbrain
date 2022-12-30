@@ -1,11 +1,13 @@
 """Transformer for ASR in the SpeechBrain sytle.
 Authors
 * Yiqi Wang, 2022
+* Jianyu Mao, 2022
 """
 
 import torch  # noqa 42
 from torch import nn
 from typing import Optional
+import re
 from speechbrain.nnet.linear import Linear
 from speechbrain.nnet.containers import ModuleList
 from speechbrain.lobes.models.transformer.InterleaveFormer import (
@@ -17,6 +19,7 @@ from speechbrain.lobes.models.transformer.InterleaveFormer import (
 )
 from speechbrain.nnet.activations import Swish
 from speechbrain.dataio.dataio import length_to_mask
+from transformers import OpenAIGPTModel
 
 
 class InterleaveFormerASR(InterleaveFormerInterface):
@@ -133,7 +136,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             NormalizedEmbedding(d_model, tgt_vocab)
         )
 
-        # reset parameters using xavier_normal_
+        # reset parameters using xavier_normal_ and load weights from pretrained GPT
         self._init_params()
 
     def forward(self, src, tgt, wave_len, seg_stats = None, pad_idx=0):
@@ -300,7 +303,44 @@ class InterleaveFormerASR(InterleaveFormerInterface):
         return prediction, attn[-1]
 
     def _init_params(self):
+        # Init parameters
         for p in self.parameters():
             if p.dim() > 1:
                 torch.nn.init.xavier_normal_(p)
+        
+        # Load pretrained weights from GPT
+        gpt = OpenAIGPTModel.from_pretrained("openai-gpt")
+        asr_gpt_key_pairs = {
+            'self_att.att.in_proj_weight': 'attn.c_attn.weight',
+            'self_att.att.in_proj_bias': 'attn.c_attn.bias',
+            'self_att.att.out_proj.weight': 'attn.c_proj.weight',
+            'self_att.att.out_proj.bias': 'attn.c_proj.bias',
+            'norm1.norm.weight': 'ln_1.weight',
+            'norm1.norm.bias': 'ln_1.bias',
+            'norm2.norm.weight': 'ln_2.weight',
+            'norm2.norm.bias': 'ln_2.bias',
+            'mlp.c_fc.weight': 'mlp.c_fc.weight',
+            'mlp.c_fc.bias': 'mlp.c_fc.bias',
+            'mlp.c_proj.weight': 'mlp.c_proj.weight',
+            'mlp.c_proj.bias': 'mlp.c_proj.bias'
+        }
+            
+        state_dict = self.state_dict()
+        
+        for param_key in self.state_dict():
+            if 'encoder.layers' in param_key and 'audio' not in param_key \
+                                        and 'text' not in param_key:
+                layer_num = re.findall(r'\d+', param_key)[0]
+                if int(layer_num) <= 9:
+                    key_start_idx = 17
+                else:
+                    key_start_idx = 18
+                gpt_key = 'h.' + layer_num + '.' + asr_gpt_key_pairs[param_key[key_start_idx:]]
+                state_dict[param_key] = gpt.state_dict()[gpt_key].T
+            if param_key == 'positional_encoding.pe' :
+                state_dict[param_key] = gpt.state_dict()['positions_embed.weight'].unsqueeze(0)
+            if param_key == 'custom_tgt_module.layers.0.emb.Embedding.weight':
+                state_dict[param_key] = gpt.state_dict()['tokens_embed.weight']
+        self.load_state_dict(state_dict=state_dict)
+
 
