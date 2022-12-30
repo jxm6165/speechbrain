@@ -292,7 +292,7 @@ class InterleaveFormerLayer(nn.Module):
         self.mlp = nn.ModuleDict(dict(
             c_fc    = nn.Linear(d_model, 4 * d_model),
             c_proj  = nn.Linear(4 * d_model, d_model),
-            act     = activation,
+            act     = NewGELU(),
             dropout = nn.Dropout(dropout),
         ))
         m = self.mlp
@@ -514,6 +514,14 @@ class NormalizedEmbedding(nn.Module):
     def forward(self, x):
         """ Processes the input tensor x and returns an output tensor."""
         return self.emb(x) * math.sqrt(self.d_model)
+
+class NewGELU(nn.Module):
+    """
+    Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
+    Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
+    """
+    def forward(self, x):
+        return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
 
 
 def get_key_padding_mask(padded_input, pad_idx):
