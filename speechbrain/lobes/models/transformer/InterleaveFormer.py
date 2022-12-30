@@ -2,6 +2,7 @@
 Authors
 * Yiqi Wang, 2022
 * Aditya Rathod, 2022
+* Jianyu Mao, 2022
 """
 import math
 import torch
@@ -288,6 +289,15 @@ class InterleaveFormerLayer(nn.Module):
 
         self.normalize_before = normalize_before
 
+        self.mlp = nn.ModuleDict(dict(
+            c_fc    = nn.Linear(d_model, 4 * d_model),
+            c_proj  = nn.Linear(4 * d_model, d_model),
+            act     = activation,
+            dropout = nn.Dropout(dropout),
+        ))
+        m = self.mlp
+        self.mlpf = lambda x: m.dropout(m.c_proj(m.act(m.c_fc(x)))) # MLP forward
+
     def forward(
         self,
         src,
@@ -346,7 +356,10 @@ class InterleaveFormerLayer(nn.Module):
         o2 = self.text_expert(text_features)
         output = torch.cat([o1, o2], dim = 1)
         # add & norm
-        output = src + self.dropout2(output)
+        output = self.dropout2(output)
+
+        # MLP (GPT arch)
+        output = src + self.mlpf(output)
         if not self.normalize_before:
             output = self.norm2(output)
         return output, self_attn
