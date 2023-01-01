@@ -95,7 +95,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
         dropout=0.1,
         activation=nn.ReLU,
         positional_encoding="fixed_abs_sine",
-        normalize_before=False,
+        normalize_before=True,
         kernel_size: Optional[int] = 31,
         bias: Optional[bool] = True,
         encoder_module: Optional[str] = "InterleaveFormer",
@@ -339,8 +339,6 @@ class InterleaveFormerASR(InterleaveFormerInterface):
                 state_dict[param_key] = gpt.state_dict()[gpt_key].T
             if param_key == 'positional_encoding.pe' :
                 state_dict[param_key] = gpt.state_dict()['positions_embed.weight'].unsqueeze(0)
-            if param_key == 'custom_tgt_module.layers.0.emb.Embedding.weight':
-                state_dict[param_key] = gpt.state_dict()['tokens_embed.weight']
         self.load_state_dict(state_dict=state_dict)
 
 
