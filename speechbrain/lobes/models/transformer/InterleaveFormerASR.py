@@ -86,9 +86,9 @@ class InterleaveFormerASR(InterleaveFormerInterface):
         self,
         tgt_vocab,
         input_size,
-        d_model=512,
-        nhead=8,
-        num_encoder_layers=6,
+        d_model=768,
+        nhead=12,
+        num_encoder_layers=12,
         num_decoder_layers=0,
         d_ffn=2048,
         dropout=0.1,
@@ -100,7 +100,7 @@ class InterleaveFormerASR(InterleaveFormerInterface):
         encoder_module: Optional[str] = "InterleaveFormer",
         conformer_activation: Optional[nn.Module] = Swish,
         attention_type: Optional[str] = "regularMHA",
-        max_length: Optional[int] = 2500,
+        max_length: Optional[int] = 512,
         causal: Optional[bool] = True,
     ):
         super().__init__(
