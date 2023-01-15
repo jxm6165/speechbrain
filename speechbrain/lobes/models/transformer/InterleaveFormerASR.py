@@ -3,7 +3,7 @@ Authors
 * Yiqi Wang, 2022
 * Jianyu Mao, 2022
 """
-
+from transformers import OpenAIGPTModel
 import torch  # noqa 42
 from torch import nn
 from typing import Optional
@@ -19,7 +19,6 @@ from speechbrain.lobes.models.transformer.InterleaveFormer import (
 )
 from speechbrain.nnet.activations import Swish
 from speechbrain.dataio.dataio import length_to_mask
-from transformers import OpenAIGPTModel
 
 
 class InterleaveFormerASR(InterleaveFormerInterface):
