@@ -339,5 +339,5 @@ class InterleaveFormerASR(InterleaveFormerInterface):
             if param_key == 'positional_encoding.pe' :
                 state_dict[param_key] = gpt.state_dict()['positions_embed.weight'].unsqueeze(0)
         self.load_state_dict(state_dict=state_dict)
-
+        print('GPT weights loaded.')
 
