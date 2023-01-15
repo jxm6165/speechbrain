@@ -134,6 +134,7 @@ Transformer: !new:speechbrain.lobes.models.transformer.InterleaveFormerASR.Inter
     activation: !ref <activation>
     encoder_module: InterleaveFormer
     attention_type: regularMHA
+    max_length: 512
     normalize_before: True
     causal: True
 
